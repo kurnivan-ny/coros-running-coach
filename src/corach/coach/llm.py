@@ -92,7 +92,14 @@ class LLMClient:
 
     @staticmethod
     def _urlopen(request: urllib.request.Request, timeout: float) -> bytes:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310
+        # Re-check the scheme here, not just at config time: urlopen would
+        # otherwise honour file:// and other local schemes.
+        if request.type not in ("http", "https"):
+            raise LLMError(f"refusing to open scheme {request.type!r}")
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPHandler, urllib.request.HTTPSHandler
+        )
+        with opener.open(request, timeout=timeout) as resp:
             return resp.read()
 
     def complete(self, system: str, user: str, max_tokens: int = 300,

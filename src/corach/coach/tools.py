@@ -145,9 +145,13 @@ def longest_run(store: Store, **_: Any) -> dict[str, Any]:
 def recent_runs(store: Store, limit: Any = 5, **_: Any) -> dict[str, Any]:
     """The most recent validated runs, newest first."""
     n = bounded_int(limit, "limit", 1, MAX_LIMIT, default=5)
+    # LIMIT is bound as a parameter, not interpolated: `n` is already validated,
+    # but keeping it parameterised means a future change to the validator cannot
+    # turn this into an injection point.
     rows = store.query(
         "SELECT activity_id, start_date_utc, distance_m, duration_s, avg_hr "
-        f"FROM silver_activities ORDER BY start_time_utc DESC LIMIT {n}"
+        "FROM silver_activities ORDER BY start_time_utc DESC LIMIT ?",
+        (n,),
     )
     return {
         "tool": "recent_runs",

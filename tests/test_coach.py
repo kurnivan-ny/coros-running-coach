@@ -321,6 +321,12 @@ class LLMClientTest(unittest.TestCase):
         with self.assertRaises(LLMError):
             client.complete("sys", "user")
 
+    def test_default_transport_refuses_non_http_schemes(self) -> None:
+        # Guards against urlopen honouring file:// if a bad URL ever slips through.
+        request = urllib.request.Request("file:///etc/passwd")
+        with self.assertRaises(LLMError):
+            LLMClient._urlopen(request, 1.0)
+
     def test_build_client_returns_none_when_unconfigured(self) -> None:
         self.assertIsNone(build_client(env={}))
         self.assertIsNone(build_client(env={"LLM_BASE_URL": "https://x/v1"}))  # no model

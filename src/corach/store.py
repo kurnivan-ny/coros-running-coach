@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -77,24 +78,31 @@ class Store:
             if self.dsn != ":memory:":
                 Path(self.dsn).parent.mkdir(parents=True, exist_ok=True)
         self._conn: Any = None
+        # Streamlit reruns the script on worker threads while caching this Store,
+        # so the connection is shared across threads. SQLite allows that only
+        # with check_same_thread=False, and only if callers serialise access --
+        # hence the lock held around every statement.
+        self._lock = threading.RLock()
 
     # -- connection -------------------------------------------------------
     def connect(self) -> Any:
-        if self._conn is not None:
-            return self._conn
-        if self.is_postgres:
-            import psycopg  # imported lazily so SQLite users need no driver
+        with self._lock:
+            if self._conn is not None:
+                return self._conn
+            if self.is_postgres:
+                import psycopg  # imported lazily so SQLite users need no driver
 
-            self._conn = psycopg.connect(self.dsn)
-        else:
-            self._conn = sqlite3.connect(self.dsn)
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
+                self._conn = psycopg.connect(self.dsn)
+            else:
+                self._conn = sqlite3.connect(self.dsn, check_same_thread=False)
+                self._conn.row_factory = sqlite3.Row
+            return self._conn
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def __enter__(self) -> Store:
         self.connect()
@@ -109,49 +117,60 @@ class Store:
         return sql.replace("?", "%s") if self.is_postgres else sql
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
-        cur = self.connect().cursor()
-        cur.execute(self._adapt(sql), tuple(params))
-        return cur
+        with self._lock:
+            cur = self.connect().cursor()
+            cur.execute(self._adapt(sql), tuple(params))
+            return cur
 
     def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
         rows = [tuple(r) for r in rows]
         if not rows:
             return
-        cur = self.connect().cursor()
-        cur.executemany(self._adapt(sql), rows)
+        with self._lock:
+            cur = self.connect().cursor()
+            cur.executemany(self._adapt(sql), rows)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        cur = self.execute(sql, params)
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
+        # Cursor is consumed inside the lock so another thread cannot interleave
+        # a statement between execute and fetchall.
+        with self._lock:
+            cur = self.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
     def commit(self) -> None:
-        if self._conn is not None:
-            self._conn.commit()
+        with self._lock:
+            if self._conn is not None:
+                self._conn.commit()
 
     def rollback(self) -> None:
-        if self._conn is not None:
-            self._conn.rollback()
+        with self._lock:
+            if self._conn is not None:
+                self._conn.rollback()
 
     @contextmanager
     def transaction(self) -> Iterator[Store]:
-        try:
-            yield self
-            self.commit()
-        except Exception:
-            self.rollback()
-            raise
+        # The lock spans the whole transaction (RLock, so nested calls are fine),
+        # so another thread cannot commit partway through it.
+        with self._lock:
+            try:
+                yield self
+                self.commit()
+            except Exception:
+                self.rollback()
+                raise
 
     def init_schema(self) -> None:
         json_type = "jsonb" if self.is_postgres else "TEXT"
         sql = _SCHEMA.format(json_type=json_type)
-        conn = self.connect()
-        if self.is_postgres:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-        else:
-            conn.executescript(sql)
-        self.commit()
+        with self._lock:
+            conn = self.connect()
+            if self.is_postgres:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+            else:
+                conn.executescript(sql)
+            self.commit()
 
 
 # -- shared upsert statements ---------------------------------------------

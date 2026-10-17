@@ -193,6 +193,25 @@ class IngestTest(unittest.TestCase):
             list(CorosMCPSource().fetch())
         self.assertIn("not implemented", str(ctx.exception).lower())
 
+    def test_store_is_usable_from_another_thread(self) -> None:
+        # Regression: Streamlit caches one Store and reruns the script on worker
+        # threads, so a thread-bound SQLite connection raised ProgrammingError.
+        import threading
+
+        run_ingest(self.store, ListSource([activity("a", "2026-10-01T06:00:00+00:00")]))
+        captured: list[object] = []
+
+        def read() -> None:
+            try:
+                captured.append(len(load_silver(self.store)))
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                captured.append(exc)
+
+        thread = threading.Thread(target=read)
+        thread.start()
+        thread.join(timeout=10)
+        self.assertEqual(captured, [1])
+
     def test_retry_helper_stops_at_max_attempts(self) -> None:
         src = FlakySource(failures=99)
         with self.assertRaises(TransientSourceError):

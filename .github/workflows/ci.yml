@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # requirements-dev.txt includes requirements.txt, so Streamlit is present
+      # and the dashboard smoke test actually runs rather than skipping.
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Fails the build if private athlete data or secrets are ever committed.
+      - name: Guard against tracked private data
+        run: |
+          set -euo pipefail
+          matches=$(git ls-files | grep -E '(^|/)(data/)|\.(db|sqlite3?|fit|tcx|gpx)$|(^|/)\.env$' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Private data files are tracked in git:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK: no private data files tracked."
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests (pytest)
+        run: pytest -q
+
+      - name: Security scan (bandit)
+        run: bandit -r src -ll
+
+      - name: Dependency audit (pip-audit)
+        run: pip-audit --strict --requirement requirements.txt
+
+      # Proves the pipeline runs end to end on SYNTHETIC data only.
+      - name: Smoke test ingestion (synthetic data only)
+        env:
+          CORACH_SQLITE_PATH: ${{ runner.temp }}/ci.db
+          CORACH_SOURCE: synthetic
+        run: |
+          set -euo pipefail
+          export PYTHONPATH=src
+          python -m corach.ingest --source synthetic
+          python -m corach.ingest --source synthetic   # must be idempotent
