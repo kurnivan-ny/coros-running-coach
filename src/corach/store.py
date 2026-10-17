@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 # JSON column type differs: Postgres has native jsonb, SQLite stores TEXT.
 _SCHEMA = """

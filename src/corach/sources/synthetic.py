@@ -6,8 +6,9 @@ Includes deliberately bad rows so the quarantine path is exercised by default.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from ..transform import SCHEMA_V1
 
@@ -24,7 +25,7 @@ class SyntheticSource:
         self.days = days
         self.seed = seed
         self.include_bad_rows = include_bad_rows
-        self.reference = reference or datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+        self.reference = reference or datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
 
     def _good_rows(self) -> list[dict[str, Any]]:
         rng = random.Random(self.seed)

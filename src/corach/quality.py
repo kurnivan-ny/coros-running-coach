@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .transform import CanonicalActivity
 
@@ -68,7 +68,7 @@ def freshness(last_success_at: str | None, threshold_hours: float = 36.0,
     except ValueError:
         return Freshness(last_success_at, None, False, threshold_hours)
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    now = now or datetime.now(timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
     age = (now - ts) / timedelta(hours=1)
     return Freshness(last_success_at, age, age <= threshold_hours, threshold_hours)

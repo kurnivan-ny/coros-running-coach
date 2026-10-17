@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 SCHEMA_V1 = "canonical_v1"
@@ -55,12 +55,12 @@ def _as_float(value: Any) -> float | None:
 
 def parse_start_time(value: Any) -> tuple[str, str]:
     """Return (ISO UTC timestamp, UTC date). Naive input is assumed UTC."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        dt = datetime.fromtimestamp(float(value), tz=UTC)
     elif isinstance(value, str) and value.strip():
         text = value.strip().replace("Z", "+00:00")
         dt = datetime.fromisoformat(text)
-        dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
     else:
         raise ValueError(f"unparseable start_time: {value!r}")
     return dt.isoformat(), dt.date().isoformat()

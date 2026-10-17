@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from .quality import validate
 from .sources import PermanentSourceError, Source, TransientSourceError
@@ -19,7 +20,7 @@ DEFAULT_MAX_ATTEMPTS = 3
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass
