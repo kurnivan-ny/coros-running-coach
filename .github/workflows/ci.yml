@@ -65,3 +65,57 @@ jobs:
           export PYTHONPATH=src
           python -m corach.ingest --source synthetic
           python -m corach.ingest --source synthetic   # must be idempotent
+
+  # Gold layer. Runs against a throwaway Postgres service so the dbt SQL is
+  # actually executed, not merely parsed. Separate job: the app environment
+  # (Streamlit Cloud) never installs dbt.
+  dbt:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corach_ci
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports: ["5432:5432"]
+    env:
+      DBT_PROFILES_DIR: dbt
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: corach_ci
+      PGSCHEMA: public
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corach_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt -r requirements-dbt.txt
+
+      # Populates bronze/silver in Postgres with SYNTHETIC data. This also
+      # exercises the Postgres branch of store.py, which SQLite tests cannot.
+      - name: Seed Postgres with synthetic data
+        run: |
+          set -euo pipefail
+          export PYTHONPATH=src
+          python -m corach.ingest --source synthetic
+
+      - name: dbt build (models + tests)
+        working-directory: dbt
+        run: |
+          set -euo pipefail
+          dbt deps --no-version-check || true
+          dbt build --no-version-check

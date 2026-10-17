@@ -1,0 +1,6 @@
+# Gold-layer transformation. Deliberately SEPARATE from requirements.txt:
+# Streamlit Community Cloud installs requirements.txt and can only run the app,
+# so dbt must not be pulled into that environment. Gold builds run in GitHub
+# Actions against Supabase.
+dbt-core==1.12.6
+dbt-postgres==1.11.0

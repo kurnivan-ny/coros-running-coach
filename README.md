@@ -11,8 +11,9 @@ real activity data. The dashboard labels it prominently whenever it is present.
 
 ## Status in one line
 
-Stage 1 (ingestion) and Stage 2 (coach + dashboard) are built and tested:
-**102 tests pass**, ruff is clean, bandit reports no medium/high issues, and
+Stages 1-2 (ingestion, coach, dashboard) are built and tested, and the Stage 3
+gold layer is written with SQL-vs-Python parity proven:
+**110 tests pass**, ruff is clean, bandit reports no medium/high issues, and
 pip-audit reports no known vulnerabilities. The COROS MCP adapter is **not
 implemented** — it is a stub that fails loudly. See
 [Verification status](#verification-status) for the per-feature breakdown.
@@ -54,9 +55,56 @@ the upsert statements in `store.py` are written once and shared.
 **Why Python rather than dbt for bronze → silver.** This layer rejects unknown
 schemas, quarantines bad rows *with a reason*, and hashes payloads to decide
 whether to write at all. Those are imperative concerns that a `SELECT` models
-poorly. dbt is planned for the **gold** layer (Stage 3), where the work is
-genuine aggregation. If gold is added, `metrics.py` stays the authoritative
-metric definition so the same number cannot drift between SQL and Python.
+poorly. dbt owns the **gold** layer only, where the work is genuine aggregation.
+
+### Gold layer (dbt)
+
+`dbt/` holds three Postgres models built from `silver_activities`:
+
+| Model | Purpose |
+|---|---|
+| `gold_weekly_volume` | Per-ISO-week volume with a full week spine, so zero-run weeks appear as 0 km rows rather than vanishing |
+| `gold_training_load` | Trailing 7/28/90-day windows with `sufficient_history` |
+| `gold_pipeline_health` | Single-row freshness and reliability summary |
+
+**`metrics.py` remains authoritative.** `dbt/macros/metrics.sql` mirrors it, and
+`tests/test_gold_parity.py` executes that SQL and asserts it matches the Python
+for every NULL-sensitive case — including a test proving a naive
+`AVG(avg_hr)` *would* disagree. This is what stops the dashboard and the chat
+reporting different numbers for the same metric.
+
+dbt targets **Postgres only**. `dbt-sqlite` is beta, was last released in June
+2025 and caps `dbt-core<1.11`, so local/CI runs keep the Python path and the
+gold models run where production runs.
+
+```bash
+pip install -r requirements-dbt.txt     # kept out of requirements.txt on purpose
+cd dbt && dbt build                     # needs PGHOST/PGUSER/PGPASSWORD/...
+```
+
+### Deploying on free tiers
+
+Supabase + Streamlit Community Cloud works, with four constraints:
+
+1. **Supabase pauses a free project after ~7 days without database activity.**
+   The scheduled GitHub Actions ingest doubles as the keep-alive, so don't let
+   the schedule lapse.
+2. **Streamlit Community Cloud sleeps after ~12 h of no traffic** and cannot run
+   background work, so ingestion and `dbt build` must live in GitHub Actions.
+3. **Connect through the Supabase pooler on port 6543**, not 5432: Streamlit
+   reruns the script constantly and would exhaust direct connections.
+4. **dbt cannot run on Streamlit Cloud**, which installs only
+   `requirements.txt` — hence `requirements-dbt.txt` being separate.
+
+```
+GitHub Actions (scheduled) ──> ingest ──> Supabase bronze/silver
+                          └──> dbt build ──> Supabase gold
+                                                │
+Streamlit Cloud (reads only) ◄──────────────────┘
+```
+
+Public Streamlit apps are world-readable; use the single free private app for
+real data, or keep the public deployment on synthetic data.
 
 ### Layout
 
@@ -220,14 +268,17 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 | Store usable across threads | `test_store_is_usable_from_another_thread` |
 | Dashboard renders, empty-DB path, chat box | `tests/test_app_smoke.py` (Streamlit `AppTest`) |
 | CI private-data guard | Run locally both ways: passed clean, and caught a planted `.env` + `data/*.db` |
+| Gold SQL matches `metrics.py` | `tests/test_gold_parity.py` — 8 tests executing the metric SQL and comparing to the Python |
+| dbt project parses; DAG resolves | `dbt parse` clean; `dbt list` shows 3 models and 17 data tests |
 
 ### Written, not fully verified
 
 | Item | Why |
 |---|---|
-| **Postgres backend** | All tests run on SQLite. The Postgres path (`psycopg`, `jsonb`, `%s` placeholders) is **written but never executed** — no Postgres instance was available. `ON CONFLICT` syntax is shared, but this must be run against a real Supabase instance before production use. |
+| **Postgres backend** | All local tests run on SQLite. The Postgres path (`psycopg`, `jsonb`, `%s` placeholders) is **written but never executed here** — no Postgres instance was available locally. The `dbt` CI job seeds Postgres via `corach.ingest`, which will exercise it, but that job has not yet run. Verify against a real Supabase instance before production use. |
 | **GitHub Actions CI** | Every step was run locally and passes (ruff, pytest, bandit, pip-audit, data guard, ingest smoke test). The workflow has **not run on GitHub** — no remote is configured. |
 | **LLM against a real provider** | Tested only with a fake transport. No real API call was made to any provider. |
+| **`dbt build` (models actually executing)** | No Postgres or Docker was available locally, so the gold models were **never run against a warehouse**. `dbt parse` and `dbt list` succeed and the metric macros are proven correct by the parity tests, but the Postgres-specific constructs — `generate_series`, `interval` arithmetic, `timestamptz` casts — are **unverified**. The `dbt` CI job runs them against a throwaway Postgres 16 service; that job has not yet run. |
 
 ### Not implemented
 
@@ -235,7 +286,7 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 |---|---|
 | **COROS MCP adapter** | Stub that raises `PermanentSourceError`. No COROS MCP server was configured, so its tools, auth flow, field names and units are **UNVERIFIED**. `sources/coros_mcp.py` lists what must be captured first. Guessing field names would fabricate data. |
 | FIT/CSV file-parser fallback | Planned if MCP cannot run unattended |
-| Gold layer / dbt-core | Stage 3 |
+| Gold layer beyond the three models | Further models (e.g. per-run training stress) not yet designed |
 | Scheduled ingestion workflow, CD | Stage 3 |
 | Fuller AI coach (7/28/90-day rationale) | Stage 3 |
 
@@ -244,10 +295,13 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 ## Testing
 
 ```bash
-pytest -q                     # 102 tests
+pytest -q                     # 110 tests
 ruff check .
 bandit -r src -ll
 pip-audit --strict --requirement requirements.txt
+
+cd dbt && dbt parse            # validates models/macros without a warehouse
+cd dbt && dbt build            # needs Postgres; run by the `dbt` CI job
 ```
 
 No test touches the network: the LLM client is driven through an injected fake
