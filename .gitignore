@@ -22,9 +22,3 @@ venv/
 .ruff_cache/
 dist/
 build/
-
-# dbt build artifacts
-dbt/target/
-dbt/logs/
-dbt/dbt_packages/
-.user.yml

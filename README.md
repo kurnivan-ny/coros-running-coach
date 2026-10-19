@@ -23,7 +23,7 @@ implemented** — it is a stub that fails loudly. See
 ## Architecture
 
 <figure>
-<img src="docs/pipeline.svg" alt="Sources produce raw payloads into bronze, which upserts only when the payload hash changes. The parser rejects unknown schemas and the validator splits rows into silver_activities or quarantines them in silver_rejects with a reason. Validated rows feed metrics.py, the whitelisted tools, the number guard and the Streamlit app; dbt gold reads validated rows only." width="760">
+<img src="docs/pipeline.svg" alt="Sources produce raw payloads into bronze, which upserts only when the payload hash changes. The parser rejects unknown schemas and the validator splits rows into silver_activities or quarantines them in silver_rejects with a reason. Validated rows feed metrics.py, the whitelisted tools, the number guard and the Streamlit app." width="760">
 <figcaption>Bad rows are quarantined with a reason instead of being dropped or coerced, and nothing invalid reaches the metrics.</figcaption>
 </figure>
 
@@ -32,35 +32,18 @@ implemented** — it is a stub that fails loudly. See
 dialect is canonical and is rewritten to `%s` for Postgres at the boundary, so
 the upsert statements in `store.py` are written once and shared.
 
-**Why Python rather than dbt for bronze → silver.** This layer rejects unknown
+**Why Python rather than dbt.** The bronze→silver layer rejects unknown
 schemas, quarantines bad rows *with a reason*, and hashes payloads to decide
-whether to write at all. Those are imperative concerns that a `SELECT` models
-poorly. dbt owns the **gold** layer only, where the work is genuine aggregation.
+whether to write at all — imperative concerns a `SELECT` models poorly.
 
-### Gold layer (dbt)
-
-`dbt/` holds three Postgres models built from `silver_activities`:
-
-| Model | Purpose |
-|---|---|
-| `gold_weekly_volume` | Per-ISO-week volume with a full week spine, so zero-run weeks appear as 0 km rows rather than vanishing |
-| `gold_training_load` | Trailing 7/28/90-day windows with `sufficient_history` |
-| `gold_pipeline_health` | Single-row freshness and reliability summary |
-
-**`metrics.py` remains authoritative.** `dbt/macros/metrics.sql` mirrors it, and
-`tests/test_gold_parity.py` executes that SQL and asserts it matches the Python
-for every NULL-sensitive case — including a test proving a naive
-`AVG(avg_hr)` *would* disagree. This is what stops the dashboard and the chat
-reporting different numbers for the same metric.
-
-dbt targets **Postgres only**. `dbt-sqlite` is beta, was last released in June
-2025 and caps `dbt-core<1.11`, so local/CI runs keep the Python path and the
-gold models run where production runs.
-
-```bash
-pip install -r requirements-dbt.txt     # kept out of requirements.txt on purpose
-cd dbt && dbt build                     # needs PGHOST/PGUSER/PGPASSWORD/...
-```
+A dbt gold layer was built and then **removed**: nothing consumed it. The
+dashboard reads `silver_activities` through the fact tools, which aggregate in
+Python, and at this data volume (a few thousand rows even after years of
+running) there is nothing expensive to precompute. Keeping it would have meant
+maintaining two implementations of every metric. See
+`git log --diff-filter=D -- dbt/` to recover it if a second consumer ever
+appears — a BI tool, a notebook, or year-over-year models that SQL handles
+better than Python.
 
 ### Deploying on free tiers
 
@@ -70,7 +53,7 @@ The whole stack runs at **$0** with no code changes — only `.env` values.
 |---|---|---|
 | Database | **Neon** | 1 GB; compute sleeps after 5 min, **wakes itself** |
 | Dashboard | Streamlit Community Cloud | Sleeps after ~12 h; wakes on visit |
-| Ingestion + dbt | GitHub Actions | 2,000 min/month private; unlimited if public |
+| Ingestion | GitHub Actions | 2,000 min/month private; unlimited if public |
 | LLM (optional) | Ollama Cloud or Cloudflare Workers AI | Unpublished free allowance |
 
 **Prefer Neon over Supabase here.** Supabase's free tier pauses the entire
@@ -86,11 +69,9 @@ Four things to get right:
 1. **Use the pooled endpoint** — Neon's `-pooler` hostname (or Supabase's port
    6543). Streamlit reruns the script on every interaction and would otherwise
    churn direct connections.
-2. **Ingestion and `dbt build` must live in GitHub Actions.** Streamlit Cloud
-   cannot run background work, and sleeps.
-3. **dbt cannot run on Streamlit Cloud**, which installs only
-   `requirements.txt` — hence `requirements-dbt.txt` being separate.
-4. **Watch Actions minutes** on a private repo. A public repo gets unlimited
+2. **Ingestion must live in GitHub Actions.** Streamlit Cloud cannot run
+   background work, and sleeps.
+3. **Watch Actions minutes** on a private repo. A public repo gets unlimited
    minutes, and is safe here: everything committed is synthetic, with
    `.gitignore` plus a CI guard keeping real data out.
 
@@ -99,7 +80,7 @@ retains raw payloads, `rebuild_silver()` reprocesses from it, and ingestion is
 idempotent. Add a periodic `pg_dump` if you hold real data.
 
 <figure>
-<img src="docs/deployment.svg" alt="GitHub Actions on a schedule runs ingestion and dbt build against Neon Postgres. Streamlit Community Cloud reads Neon through the pooled endpoint and optionally calls a hosted LLM over https, sending aggregates only. Neon sleeps after 5 minutes and wakes on connect; Streamlit sleeps after about 12 hours and wakes on visit." width="760">
+<img src="docs/deployment.svg" alt="GitHub Actions on a schedule runs ingestion against Neon Postgres. Streamlit Community Cloud reads Neon through the pooled endpoint and optionally calls a hosted LLM over https, sending aggregates only. Neon sleeps after 5 minutes and wakes on connect; Streamlit sleeps after about 12 hours and wakes on visit." width="760">
 <figcaption>Every component is free tier. Neon sleeps and wakes itself; Supabase would pause after 7 days and need a manual unpause.</figcaption>
 </figure>
 
@@ -271,16 +252,14 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 | Dashboard renders, empty-DB path, chat box | `tests/test_app_smoke.py` (Streamlit `AppTest`) |
 | CI private-data guard | Run locally both ways: passed clean, and caught a planted `.env` + `data/*.db` |
 | Gold SQL matches `metrics.py` | `tests/test_gold_parity.py` — 8 tests executing the metric SQL and comparing to the Python |
-| dbt project parses; DAG resolves | `dbt parse` clean; `dbt list` shows 3 models and 17 data tests |
 
 ### Written, not fully verified
 
 | Item | Why |
 |---|---|
-| **Postgres backend** | All local tests run on SQLite. The Postgres path (`psycopg`, `jsonb`, `%s` placeholders) is **written but never executed here** — no Postgres instance was available locally. The `dbt` CI job seeds Postgres via `corach.ingest`, which will exercise it, but that job has not yet run. Verify against a real Supabase instance before production use. |
+| **Postgres backend** | All local tests run on SQLite. The Postgres path (`psycopg`, `jsonb`, `%s` placeholders) is **written but never executed here** — no Postgres instance was available locally. The `postgres` CI job runs `corach.verify_postgres` against a real server, but that job has not yet run. Verify against your actual provider before production use. |
 | **GitHub Actions CI** | Every step was run locally and passes (ruff, pytest, bandit, pip-audit, data guard, ingest smoke test). The workflow has **not run on GitHub** — no remote is configured. |
 | **LLM against a real provider** | Tested only with a fake transport. No real API call was made to any provider. |
-| **`dbt build` (models actually executing)** | No Postgres or Docker was available locally, so the gold models were **never run against a warehouse**. `dbt parse` and `dbt list` succeed and the metric macros are proven correct by the parity tests, but the Postgres-specific constructs — `generate_series`, `interval` arithmetic, `timestamptz` casts — are **unverified**. The `dbt` CI job runs them against a throwaway Postgres 16 service; that job has not yet run. |
 
 ### Not implemented
 
@@ -302,8 +281,8 @@ ruff check .
 bandit -r src -ll
 pip-audit --strict --requirement requirements.txt
 
-cd dbt && dbt parse            # validates models/macros without a warehouse
-cd dbt && dbt build            # needs Postgres; run by the `dbt` CI job
+# Postgres-only checks (needs DATABASE_URL pointing at a real server):
+PYTHONPATH=src python -m corach.verify_postgres
 ```
 
 No test touches the network: the LLM client is driven through an injected fake
