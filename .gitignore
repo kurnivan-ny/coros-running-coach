@@ -22,3 +22,6 @@ venv/
 .ruff_cache/
 dist/
 build/
+
+# Streamlit secrets (the .example file is safe to commit)
+.streamlit/secrets.toml

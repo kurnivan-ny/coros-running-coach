@@ -105,6 +105,60 @@ real data, or keep the public deployment on synthetic data.
 
 ---
 
+### Deployment runbook
+
+<figure>
+<img src="docs/deploy-flow.svg" alt="Five deployment steps: push to GitHub; create a Neon project and copy the pooled connection string; add it as the DATABASE_URL Actions secret and run the ingest workflow once by hand; deploy app.py on Streamlit Community Cloud with the same string in its Secrets panel; then let the daily schedule run. Each step lists what to check before moving on." width="760">
+<figcaption>Each step has a check. If a check fails, fix it before continuing — a later step will fail more confusingly.</figcaption>
+</figure>
+
+**1 — Push to GitHub.**
+
+```bash
+git remote add origin https://github.com/<you>/coros-running-coach.git
+git push -u origin main
+```
+
+A **public** repo gets unlimited Actions minutes, and is safe here: everything
+committed is synthetic, and the CI guard fails the build if a `.env`, `*.db` or
+`data/` file is ever tracked.
+*Check: the `test` job passes.*
+
+**2 — Create a Neon project.** Copy the **pooled** connection string — its host
+contains `-pooler` — and keep the `?sslmode=require` suffix. The pooled endpoint
+matters because Streamlit reruns the script on every interaction.
+*Check: it looks like `postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require`.*
+
+**3 — Add the secret and seed the database.** In the repo: **Settings → Secrets
+and variables → Actions → New repository secret**, named `DATABASE_URL`. Then
+run the **Scheduled ingest** workflow once manually (Actions → Scheduled ingest
+→ Run workflow) to create the tables and load data.
+*Check: the log prints `ingest success: fetched=… silver=…`.*
+
+**4 — Deploy the dashboard.** On [share.streamlit.io](https://share.streamlit.io),
+point a new app at your repo and `app.py`. Open **Settings → Secrets** and paste:
+
+```toml
+DATABASE_URL = "postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/neondb?sslmode=require"
+```
+
+Streamlit Cloud has no environment variables, so this panel is how the app gets
+configured; `app.py` copies `st.secrets` into `os.environ` at startup.
+*Check: the KPI cards show numbers rather than the "No activities" warning.*
+
+**5 — Let the schedule run.** `.github/workflows/ingest.yml` runs daily at 03:17
+UTC. Nothing further is needed.
+*Check tomorrow: the dashboard banner still reads "Pipeline fresh".*
+
+**Optional — LLM phrasing.** Add `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`
+to the Streamlit secrets (see `.env.example` for verified free providers).
+Without them the chat works deterministically.
+
+> **Before pointing this at real COROS data:** a public Streamlit app is
+> world-readable — use the one free private app. And the COROS adapter is still
+> a stub, so `CORACH_SOURCE` must stay `synthetic` until it exists.
+
+
 ## Quickstart
 
 ```bash

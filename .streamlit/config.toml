@@ -1,0 +1,10 @@
+# Committed. Contains no secrets.
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2f6df6"

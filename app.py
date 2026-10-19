@@ -27,6 +27,19 @@ st.set_page_config(page_title="COROS Running Coach", page_icon="🏃", layout="w
 ACCENT = "#2f6df6"
 MUTED = "#8a94a6"
 
+# Streamlit Community Cloud supplies configuration through st.secrets, not the
+# environment. Copy it across before anything reads os.environ, so Store() and
+# build_client() behave identically when deployed and when run locally.
+# Existing environment variables win, so a local .env is not overridden.
+_SETTINGS = ("DATABASE_URL", "CORACH_SQLITE_PATH", "CORACH_SOURCE",
+             "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "LLM_TIMEOUT")
+try:
+    for _key in _SETTINGS:
+        if _key in st.secrets and not os.environ.get(_key):
+            os.environ[_key] = str(st.secrets[_key])
+except Exception:  # noqa: BLE001 - no secrets.toml is the normal local case
+    pass
+
 
 @st.cache_resource
 def get_store() -> Store:

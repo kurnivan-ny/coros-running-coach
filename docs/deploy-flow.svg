@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" width="760" height="560" role="img" aria-label="Deployment sequence in five steps: push the repository to GitHub, create a Neon project and copy its pooled connection string, add that string as the DATABASE_URL Actions secret and run the ingest workflow once by hand, deploy app.py on Streamlit Community Cloud with the same string in its Secrets panel, then let the daily schedule take over. A verification gate after each step says what to check.">
+  <title>Deployment flow</title>
+  <defs>
+    <marker id="f-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+
+  <!-- Step 1 -->
+  <circle cx="44" cy="44" r="17" fill="none" stroke="#2f6df6" stroke-width="1.5"/>
+  <text x="44" y="49" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">1</text>
+  <text x="76" y="38" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">Push to GitHub</text>
+  <text x="76" y="58" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Public repo &#8594; unlimited Actions minutes. The CI guard blocks private data.</text>
+  <text x="76" y="74" font-family="system-ui,sans-serif" font-size="11" fill="#166534">Check: the `test` job goes green.</text>
+  <line x1="44" y1="61" x2="44" y2="97" stroke="#6b7280" stroke-width="1.5" marker-end="url(#f-ar)"/>
+
+  <!-- Step 2 -->
+  <circle cx="44" cy="114" r="17" fill="none" stroke="#2f6df6" stroke-width="1.5"/>
+  <text x="44" y="119" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">2</text>
+  <text x="76" y="108" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">Create the Neon project</text>
+  <text x="76" y="128" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Copy the <tspan font-weight="600">pooled</tspan> connection string &#8212; the host containing &#8220;-pooler&#8221;.</text>
+  <text x="76" y="144" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Keep ?sslmode=require on the end.</text>
+  <text x="76" y="160" font-family="system-ui,sans-serif" font-size="11" fill="#166534">Check: psql connects, or step 3 will tell you.</text>
+  <line x1="44" y1="131" x2="44" y2="183" stroke="#6b7280" stroke-width="1.5" marker-end="url(#f-ar)"/>
+
+  <!-- Step 3 -->
+  <circle cx="44" cy="200" r="17" fill="none" stroke="#2f6df6" stroke-width="1.5"/>
+  <text x="44" y="205" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">3</text>
+  <text x="76" y="194" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">Add the secret, then seed the database</text>
+  <text x="76" y="214" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Settings &#8594; Secrets and variables &#8594; Actions &#8594; new secret <tspan font-weight="600">DATABASE_URL</tspan></text>
+  <text x="76" y="230" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Then run <tspan font-weight="600">Scheduled ingest</tspan> by hand (Run workflow) so the tables exist.</text>
+  <text x="76" y="246" font-family="system-ui,sans-serif" font-size="11" fill="#166534">Check: the log prints `ingest success: &#8230; silver=N`.</text>
+  <line x1="44" y1="217" x2="44" y2="269" stroke="#6b7280" stroke-width="1.5" marker-end="url(#f-ar)"/>
+
+  <!-- Step 4 -->
+  <circle cx="44" cy="286" r="17" fill="none" stroke="#2f6df6" stroke-width="1.5"/>
+  <text x="44" y="291" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">4</text>
+  <text x="76" y="280" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#2f6df6">Deploy on Streamlit Community Cloud</text>
+  <text x="76" y="300" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Point it at <tspan font-weight="600">app.py</tspan>. Paste the SAME connection string into its Secrets panel</text>
+  <text x="76" y="316" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">as <tspan font-weight="600">DATABASE_URL = "&#8230;"</tspan> &#8212; Streamlit has no environment variables.</text>
+  <text x="76" y="332" font-family="system-ui,sans-serif" font-size="11" fill="#166534">Check: KPI cards show numbers, not the &#8220;No activities&#8221; warning.</text>
+  <line x1="44" y1="303" x2="44" y2="355" stroke="#6b7280" stroke-width="1.5" marker-end="url(#f-ar)"/>
+
+  <!-- Step 5 -->
+  <circle cx="44" cy="372" r="17" fill="none" stroke="#166534" stroke-width="1.5"/>
+  <text x="44" y="377" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#166534">5</text>
+  <text x="76" y="366" font-family="system-ui,sans-serif" font-size="14" font-weight="600" fill="#166534">Let the schedule run</text>
+  <text x="76" y="386" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">03:17 UTC daily, unattended. Nothing else to do.</text>
+  <text x="76" y="402" font-family="system-ui,sans-serif" font-size="11" fill="#166534">Check tomorrow: the dashboard banner still reads &#8220;Pipeline fresh&#8221;.</text>
+
+  <!-- Optional -->
+  <rect x="20" y="430" width="720" height="52" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="36" y="452" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#6b7280">Optional, any time afterwards</text>
+  <text x="36" y="471" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Add LLM_BASE_URL / LLM_MODEL / LLM_API_KEY to the Streamlit secrets for LLM phrasing. Without them the chat still works, deterministically.</text>
+
+  <!-- Warning -->
+  <rect x="20" y="496" width="720" height="52" rx="6" fill="none" stroke="#b91c1c" stroke-width="1.5"/>
+  <text x="36" y="518" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#b91c1c">Before you point this at real COROS data</text>
+  <text x="36" y="537" font-family="system-ui,sans-serif" font-size="11" fill="#b91c1c">A public Streamlit app is world-readable. Use the one free private app, and keep CORACH_SOURCE=synthetic until the adapter exists.</text>
+</svg>

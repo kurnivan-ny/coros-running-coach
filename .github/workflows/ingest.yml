@@ -1,0 +1,66 @@
+name: Scheduled ingest
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off the hour on purpose: GitHub's scheduler is busiest
+    # at :00 and delays queued jobs there.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: "Ignore the watermark and re-read everything"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never let two ingests write to the same database at once.
+concurrency:
+  group: ingest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ingest
+        env:
+          # Set this secret to your Neon/Supabase pooled connection string.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CORACH_SOURCE: ${{ vars.CORACH_SOURCE || 'synthetic' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add it under"
+            echo "::error::Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          export PYTHONPATH=src
+          if [ "${{ inputs.full_refresh }}" = "true" ]; then
+            python -m corach.ingest --full-refresh
+          else
+            python -m corach.ingest
+          fi
+
+      # ingest.py already exits non-zero and records the failure in
+      # ops_pipeline_runs, so the dashboard's freshness banner goes stale
+      # visibly. This step makes the failure visible in GitHub too.
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "::error::Ingest failed. The dashboard will show a stale"
+          echo "::error::pipeline banner until the next successful run."
