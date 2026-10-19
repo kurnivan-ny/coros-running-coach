@@ -22,31 +22,11 @@ implemented** — it is a stub that fails loudly. See
 
 ## Architecture
 
-```
-┌──────────────┐
-│   Sources    │  SyntheticSource (works) · CorosMCPSource (stub, fails loudly)
-└──────┬───────┘
-       │ raw payload dicts
-       ▼
-┌──────────────────────────────────────────────────────────────┐
-│ bronze_activities    raw JSON + payload_hash                 │
-│                      upsert ONLY when the hash changes       │
-└──────┬───────────────────────────────────────────────────────┘
-       │ transform.parse_activity  (canonical_v1 only)
-       │ quality.validate
-       ▼
-┌───────────────────────────┐   ┌──────────────────────────────┐
-│ silver_activities         │   │ silver_rejects               │
-│ typed, validated rows     │   │ quarantine + failure reason  │
-└──────┬────────────────────┘   └──────────────────────────────┘
-       │                         ops_pipeline_runs: status, counts, error
-       ▼
-┌──────────────────────────────────────────────────────────────┐
-│ metrics.py (pure Python)  →  coach/tools.py (whitelisted)    │
-│                           →  coach/chat.py  (number guard)   │
-│                           →  app.py (Streamlit + Plotly)     │
-└──────────────────────────────────────────────────────────────┘
-```
+<figure>
+<img src="docs/pipeline.svg" alt="Sources produce raw payloads into bronze, which upserts only when the payload hash changes. The parser rejects unknown schemas and the validator splits rows into silver_activities or quarantines them in silver_rejects with a reason. Validated rows feed metrics.py, the whitelisted tools, the number guard and the Streamlit app; dbt gold reads validated rows only." width="760">
+<figcaption>Bad rows are quarantined with a reason instead of being dropped or coerced, and nothing invalid reaches the metrics.</figcaption>
+</figure>
+
 
 **Storage.** One `Store` class serves both backends. SQLite's `?` placeholder
 dialect is canonical and is rewritten to `%s` for Postgres at the boundary, so
@@ -84,24 +64,45 @@ cd dbt && dbt build                     # needs PGHOST/PGUSER/PGPASSWORD/...
 
 ### Deploying on free tiers
 
-Supabase + Streamlit Community Cloud works, with four constraints:
+The whole stack runs at **$0** with no code changes — only `.env` values.
 
-1. **Supabase pauses a free project after ~7 days without database activity.**
-   The scheduled GitHub Actions ingest doubles as the keep-alive, so don't let
-   the schedule lapse.
-2. **Streamlit Community Cloud sleeps after ~12 h of no traffic** and cannot run
-   background work, so ingestion and `dbt build` must live in GitHub Actions.
-3. **Connect through the Supabase pooler on port 6543**, not 5432: Streamlit
-   reruns the script constantly and would exhaust direct connections.
-4. **dbt cannot run on Streamlit Cloud**, which installs only
+| Layer | Free option | Constraint that actually bites |
+|---|---|---|
+| Database | **Neon** | 1 GB; compute sleeps after 5 min, **wakes itself** |
+| Dashboard | Streamlit Community Cloud | Sleeps after ~12 h; wakes on visit |
+| Ingestion + dbt | GitHub Actions | 2,000 min/month private; unlimited if public |
+| LLM (optional) | Ollama Cloud or Cloudflare Workers AI | Unpublished free allowance |
+
+**Prefer Neon over Supabase here.** Supabase's free tier pauses the entire
+project after 7 days of inactivity and needs a **manual dashboard click** to
+return, which makes the scheduled ingest load-bearing: miss it and the dashboard
+stays down until you intervene. Neon only suspends compute and resumes on the
+next connection, so the failure mode is a slow first query rather than an
+outage. Supabase remains a fine choice if you later want its bundled auth,
+storage or realtime — none of which this project uses.
+
+Four things to get right:
+
+1. **Use the pooled endpoint** — Neon's `-pooler` hostname (or Supabase's port
+   6543). Streamlit reruns the script on every interaction and would otherwise
+   churn direct connections.
+2. **Ingestion and `dbt build` must live in GitHub Actions.** Streamlit Cloud
+   cannot run background work, and sleeps.
+3. **dbt cannot run on Streamlit Cloud**, which installs only
    `requirements.txt` — hence `requirements-dbt.txt` being separate.
+4. **Watch Actions minutes** on a private repo. A public repo gets unlimited
+   minutes, and is safe here: everything committed is synthetic, with
+   `.gitignore` plus a CI guard keeping real data out.
 
-```
-GitHub Actions (scheduled) ──> ingest ──> Supabase bronze/silver
-                          └──> dbt build ──> Supabase gold
-                                                │
-Streamlit Cloud (reads only) ◄──────────────────┘
-```
+**No free tier includes backups.** The design is the safety net instead: bronze
+retains raw payloads, `rebuild_silver()` reprocesses from it, and ingestion is
+idempotent. Add a periodic `pg_dump` if you hold real data.
+
+<figure>
+<img src="docs/deployment.svg" alt="GitHub Actions on a schedule runs ingestion and dbt build against Neon Postgres. Streamlit Community Cloud reads Neon through the pooled endpoint and optionally calls a hosted LLM over https, sending aggregates only. Neon sleeps after 5 minutes and wakes on connect; Streamlit sleeps after about 12 hours and wakes on visit." width="760">
+<figcaption>Every component is free tier. Neon sleeps and wakes itself; Supabase would pause after 7 days and need a manual unpause.</figcaption>
+</figure>
+
 
 Public Streamlit apps are world-readable; use the single free private app for
 real data, or keep the public deployment on synthetic data.
@@ -221,6 +222,7 @@ sources on 2026-10-17:
 | Provider | Trains on inputs? | Retention | Source |
 |---|---|---|---|
 | **Cloudflare Workers AI** (recommended) | **No** — "Cloudflare does not use Customer Content processed by Workers AI to train AI models" | Not retained after the request for standard inference | [docs](https://developers.cloudflare.com/workers-ai/platform/privacy/) |
+| **Ollama Cloud** | **No** — "We do not use your inputs or outputs to train any AI models" | "Processed transiently… not stored beyond the time required to fulfill the request" | [policy](https://registry.ollama.ai/privacy) |
 | **Groq** | **Not stated on the data page** — it documents retention only, not training | "By default, Groq does not retain customer data for inference requests"; abuse/reliability logs up to 30 days; ZDR available | [docs](https://console.groq.com/docs/your-data) |
 | **Google Gemini free tier** | **Yes** — content is used "to provide, improve, and develop" Google products; human reviewers may read inputs and outputs | — | [terms](https://ai.google.dev/gemini-api/terms) |
 

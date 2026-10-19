@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 500" width="760" height="500" role="img" aria-label="Data flow: sources produce raw payloads into bronze, which upserts only when the payload hash changes; the parser rejects unknown schemas and the validator splits rows into silver_activities or quarantines them in silver_rejects with a reason; metrics, whitelisted tools and a number guard feed the Streamlit app.">
+  <title>COROS coach ingestion pipeline</title>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+
+  <!-- Sources -->
+  <rect x="20" y="20" width="200" height="66" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="120" y="44" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#6b7280">Sources</text>
+  <text x="120" y="62" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">SyntheticSource (works)</text>
+  <text x="120" y="77" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#b91c1c">CorosMCPSource (stub)</text>
+
+  <line x1="120" y1="86" x2="120" y2="128" stroke="#6b7280" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="130" y="111" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">raw payload dicts</text>
+
+  <!-- Bronze -->
+  <rect x="20" y="128" width="470" height="62" rx="6" fill="none" stroke="#a16207" stroke-width="1.5"/>
+  <text x="36" y="151" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#a16207">bronze_activities</text>
+  <text x="36" y="169" font-family="system-ui,sans-serif" font-size="11" fill="#a16207">raw JSON + payload_hash</text>
+  <text x="36" y="184" font-family="system-ui,sans-serif" font-size="11" fill="#a16207">upsert ONLY when the hash changes &#8212; so a rerun writes nothing</text>
+
+  <line x1="120" y1="190" x2="120" y2="246" stroke="#6b7280" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="130" y="213" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">parse_activity (canonical_v1 only)</text>
+  <text x="130" y="229" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">quality.validate</text>
+
+  <!-- Silver -->
+  <rect x="20" y="246" width="230" height="64" rx="6" fill="none" stroke="#0e7490" stroke-width="1.5"/>
+  <text x="36" y="269" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#0e7490">silver_activities</text>
+  <text x="36" y="287" font-family="system-ui,sans-serif" font-size="11" fill="#0e7490">typed, validated rows</text>
+  <text x="36" y="302" font-family="system-ui,sans-serif" font-size="11" fill="#0e7490">missing HR stays NULL</text>
+
+  <!-- Rejects -->
+  <rect x="300" y="246" width="230" height="64" rx="6" fill="none" stroke="#b91c1c" stroke-width="1.5"/>
+  <text x="316" y="269" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#b91c1c">silver_rejects</text>
+  <text x="316" y="287" font-family="system-ui,sans-serif" font-size="11" fill="#b91c1c">quarantine + failure reason</text>
+  <text x="316" y="302" font-family="system-ui,sans-serif" font-size="11" fill="#b91c1c">never reaches the metrics</text>
+
+  <line x1="250" y1="278" x2="300" y2="278" stroke="#b91c1c" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <text x="275" y="271" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#b91c1c">invalid</text>
+
+  <!-- Ops -->
+  <rect x="560" y="128" width="180" height="182" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="576" y="151" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#6b7280">ops_pipeline_runs</text>
+  <text x="576" y="172" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">status, row counts,</text>
+  <text x="576" y="187" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">watermark, error</text>
+  <text x="576" y="211" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">A failure is logged</text>
+  <text x="576" y="226" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">here, then re-raised</text>
+  <text x="576" y="241" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">so the CLI exits 1.</text>
+  <text x="576" y="265" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">Freshness = age of</text>
+  <text x="576" y="280" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">the last SUCCESSFUL</text>
+  <text x="576" y="295" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">run.</text>
+
+  <line x1="490" y1="159" x2="560" y2="159" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+
+  <!-- Serving -->
+  <line x1="135" y1="310" x2="135" y2="352" stroke="#6b7280" stroke-width="1.5" marker-end="url(#ar)"/>
+  <rect x="20" y="352" width="510" height="56" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="36" y="375" font-family="system-ui,sans-serif" font-size="12" fill="#6b7280"><tspan font-weight="600">metrics.py</tspan> (pure Python, authoritative)  &#8594;  <tspan font-weight="600">coach/tools.py</tspan> (whitelisted, read-only)</text>
+  <text x="36" y="396" font-family="system-ui,sans-serif" font-size="12" fill="#6b7280">&#8594;  <tspan font-weight="600">coach/chat.py</tspan> (number guard)  &#8594;  <tspan font-weight="600">app.py</tspan> (Streamlit + Plotly)</text>
+
+  <line x1="135" y1="408" x2="135" y2="444" stroke="#6b7280" stroke-width="1.5" marker-end="url(#ar)"/>
+  <rect x="20" y="444" width="510" height="40" rx="6" fill="none" stroke="#166534" stroke-width="1.5"/>
+  <text x="36" y="469" font-family="system-ui,sans-serif" font-size="12" fill="#166534">An LLM may only <tspan font-weight="600">rephrase</tspan> these facts. Any number not in them is rejected.</text>
+
+  <!-- dbt gold: routed from silver's BOTTOM edge, under the rejects box, so the
+       path cannot be misread as originating in silver_rejects. -->
+  <path d="M 210 310 L 210 332 L 650 332 L 650 352" fill="none" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+  <text x="430" y="327" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#6b7280">validated rows only</text>
+  <rect x="560" y="352" width="180" height="56" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="576" y="374" font-family="system-ui,sans-serif" font-size="12" font-weight="600" fill="#6b7280">dbt gold (Postgres)</text>
+  <text x="576" y="394" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">aggregation only</text>
+</svg>
