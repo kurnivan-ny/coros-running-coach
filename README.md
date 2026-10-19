@@ -11,9 +11,8 @@ real activity data. The dashboard labels it prominently whenever it is present.
 
 ## Status in one line
 
-Stages 1-2 (ingestion, coach, dashboard) are built and tested, and the Stage 3
-gold layer is written with SQL-vs-Python parity proven:
-**110 tests pass**, ruff is clean, bandit reports no medium/high issues, and
+Ingestion, the coach and the dashboard are built and tested:
+**102 tests pass**, ruff is clean, bandit reports no medium/high issues, and
 pip-audit reports no known vulnerabilities. The COROS MCP adapter is **not
 implemented** — it is a stub that fails loudly. See
 [Verification status](#verification-status) for the per-feature breakdown.
@@ -254,7 +253,6 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 | Store usable across threads | `test_store_is_usable_from_another_thread` |
 | Dashboard renders, empty-DB path, chat box | `tests/test_app_smoke.py` (Streamlit `AppTest`) |
 | CI private-data guard | Run locally both ways: passed clean, and caught a planted `.env` + `data/*.db` |
-| Gold SQL matches `metrics.py` | `tests/test_gold_parity.py` — 8 tests executing the metric SQL and comparing to the Python |
 
 ### Written, not fully verified
 
@@ -279,7 +277,7 @@ Honest accounting. "Tested" means an automated test exercises it and I ran it.
 ## Testing
 
 ```bash
-pytest -q                     # 110 tests
+pytest -q                     # 102 tests
 ruff check .
 bandit -r src -ll
 pip-audit --strict --requirement requirements.txt

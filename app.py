@@ -25,7 +25,6 @@ from corach.store import Store  # noqa: E402
 st.set_page_config(page_title="COROS Running Coach", page_icon="🏃", layout="wide")
 
 ACCENT = "#2f6df6"
-MUTED = "#8a94a6"
 
 # Streamlit Community Cloud supplies configuration through st.secrets, not the
 # environment. Copy it across before anything reads os.environ, so Store() and

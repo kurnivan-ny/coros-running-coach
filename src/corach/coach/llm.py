@@ -28,10 +28,6 @@ class LLMError(RuntimeError):
     """LLM call failed. Message is always redacted."""
 
 
-class LLMNotConfigured(LLMError):
-    """No LLM configured; the caller should fall back to deterministic phrasing."""
-
-
 @dataclass(frozen=True)
 class LLMConfig:
     base_url: str

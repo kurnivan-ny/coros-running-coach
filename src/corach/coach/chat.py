@@ -38,12 +38,6 @@ class ChatAnswer:
     mode: str = "deterministic"  # deterministic | llm | llm_rejected | error
     note: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "question": self.question, "intent": self.intent, "facts": self.facts,
-            "answer": self.answer, "mode": self.mode, "note": self.note,
-        }
-
 
 def route(question: str) -> tuple[str, dict[str, Any]]:
     """Map a question to an intent and bounded tool arguments."""
