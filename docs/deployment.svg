@@ -13,7 +13,7 @@
   <rect x="20" y="30" width="210" height="104" rx="6" fill="none" stroke="#6b7280" stroke-width="1.5"/>
   <text x="36" y="53" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#6b7280">GitHub Actions</text>
   <text x="36" y="72" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">scheduled (cron)</text>
-  <text x="36" y="93" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">&#8226; corach.ingest (daily)</text>
+  <text x="36" y="93" font-family="system-ui,sans-serif" font-size="11" fill="#6b7280">&#8226; dbt build + tests (daily)</text>
   <text x="36" y="127" font-family="system-ui,sans-serif" font-size="10" fill="#6b7280">2,000 min/mo private &#183; free if public</text>
 
   <!-- Neon -->

@@ -97,14 +97,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Ingest against Postgres (synthetic data only)
+      - name: Ingest bronze against Postgres (synthetic data only)
         run: |
           set -euo pipefail
           export PYTHONPATH=src
           python -m corach.ingest --source synthetic
           python -m corach.ingest --source synthetic   # must be idempotent
 
-      - name: Verify Postgres round-trip
+      # Silver and gold are dbt models, so this builds them and runs every dbt
+      # test (uniqueness, accepted values, bronze-to-silver reconciliation).
+      - name: Build silver and gold with dbt (synthetic data only)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corach_ci?sslmode=disable
+        run: |
+          set -euo pipefail
+          export PYTHONPATH=src
+          python -m corach.transform_run build
+
+      - name: Verify Postgres, dbt output and coach tools
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corach_ci?sslmode=disable
         run: |
           set -euo pipefail
           export PYTHONPATH=src

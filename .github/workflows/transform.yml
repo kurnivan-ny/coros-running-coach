@@ -1,0 +1,88 @@
+name: Sync Strava and build silver and gold (dbt)
+
+# COROS data is loaded from your machine (it comes from a Claude session and never
+# leaves it, so GitHub cannot fetch it). Strava is different: it is a normal web API,
+# so this workflow can pull it unattended. It is OFF until you set the repository
+# variable STRAVA_ENABLED=true (Settings > Secrets and variables > Actions > Variables).
+#
+# Then it rebuilds the dbt silver and gold layers in Neon from whatever bronze holds
+# and runs the dbt tests, so a bad load is caught here instead of on the dashboard.
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off the hour on purpose: GitHub's scheduler is busiest
+    # at :00 and delays queued jobs there.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["dbt/**", "requirements-dbt.txt", ".github/workflows/transform.yml"]
+
+permissions:
+  contents: read
+
+# Never let two builds write to the same database at once.
+concurrency:
+  group: transform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  transform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dbt.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dbt.txt
+
+      # Incremental: asks Strava only for activities since the watermark (plus a
+      # 3-day overlap) and writes bronze only when a payload actually changed.
+      # Strava may rotate the refresh token; if it does, the log shows a
+      # ::warning:: and you must update the STRAVA_REFRESH_TOKEN secret, or the
+      # next run fails with a clear 401/403 message.
+      - name: Sync Strava into bronze
+        if: ${{ vars.STRAVA_ENABLED == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in DATABASE_URL STRAVA_CLIENT_ID STRAVA_CLIENT_SECRET STRAVA_REFRESH_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The $name secret is not set (STRAVA_ENABLED is true)."
+              exit 1
+            fi
+          done
+          export PYTHONPATH=src
+          python -m corach.ingest --source strava
+
+      - name: dbt build (models + tests)
+        env:
+          # Neon pooled connection string, with ?sslmode=require
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::DATABASE_URL secret is not set. Add it under"
+            echo "::error::Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          export PYTHONPATH=src
+          python -m corach.transform_run build
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "::error::dbt build failed. Silver/gold keep their last good state"
+          echo "::error::only for tables dbt did not get to; check the log above."
