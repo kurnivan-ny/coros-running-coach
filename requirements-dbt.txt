@@ -1,0 +1,4 @@
+# Only needed to BUILD silver and gold (GitHub Actions or your machine).
+# The Streamlit app does not need dbt, so it is kept out of requirements.txt to
+# keep the deployed app small.
+dbt-postgres==1.11.0

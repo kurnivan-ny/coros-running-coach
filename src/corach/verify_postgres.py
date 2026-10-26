@@ -1,19 +1,22 @@
-"""Postgres round-trip check, run by the `postgres` CI job.
+"""End-to-end Postgres check, run by the `postgres` CI job.
 
-The unit tests all run on SQLite, so the Postgres branch of store.py -- psycopg,
-jsonb payload columns, and the ``?`` -> ``%s`` placeholder rewrite -- is never
-exercised by them. This module asserts the properties that could plausibly
-differ between the two backends, against a real server.
+The unit tests all run on SQLite, so the Postgres branch of store.py (psycopg,
+jsonb payloads, the ``?`` -> ``%s`` rewrite) and the dbt silver/gold layers are
+never exercised by them. After CI has ingested SYNTHETIC data and run
+``dbt build``, this module asserts the properties that could plausibly differ
+between backends, against a real server, and that the coach tools run on the
+gold tables dbt produced.
 
 Exits non-zero on the first failed assertion.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 
-from .ingest import load_silver, rebuild_silver, run_ingest
-from .metrics import weighted_avg_hr
+from .coach.tools import call_tool
+from .ingest import run_ingest
 from .sources.synthetic import SyntheticSource
 from .store import Store
 
@@ -30,55 +33,61 @@ def main() -> int:
         print("verify_postgres: DATABASE_URL is not a Postgres DSN; nothing to verify.")
         return 1
 
-    print("verify_postgres: checking the Postgres backend")
+    print("verify_postgres: checking Postgres bronze, dbt silver/gold and the coach tools")
     ok = True
     try:
         store.init_schema()
 
-        # A prior ingest in the same CI job has already populated the database.
-        rows = load_silver(store)
-        ok &= _check("silver has rows", len(rows) > 0, f"{len(rows)} rows")
-
-        # The property most likely to be silently broken by a backend swap:
-        # a missing heart rate must come back as None, not 0 and not "NaN".
-        null_hr = [r for r in rows if r["avg_hr"] is None]
-        ok &= _check("missing HR reads back as NULL", len(null_hr) > 0,
-                     f"{len(null_hr)} rows with NULL avg_hr")
-        ok &= _check("no HR was coerced to zero",
-                     all(r["avg_hr"] != 0 for r in rows))
-
-        # jsonb round-trip: bronze payloads must still parse.
         bronze = store.query("SELECT payload FROM bronze_activities LIMIT 1")
         payload = bronze[0]["payload"] if bronze else None
         if isinstance(payload, str):
-            import json
             payload = json.loads(payload)
         ok &= _check("bronze payload round-trips as an object",
                      isinstance(payload, dict) and "schema" in payload)
 
-        # Metrics must compute over Postgres rows exactly as over SQLite rows.
-        hr = weighted_avg_hr(rows)
-        ok &= _check("duration-weighted HR computes", hr is None or hr > 0,
-                     "None" if hr is None else f"{hr:.1f} bpm")
+        counts = store.query(
+            "SELECT (SELECT COUNT(*) FROM bronze_activities) AS bronze, "
+            "(SELECT COUNT(*) FROM silver.silver_activities) AS silver, "
+            "(SELECT COUNT(*) FROM silver.silver_rejects) AS rejects")[0]
+        ok &= _check("every bronze row is in silver or quarantine",
+                     counts["bronze"] == counts["silver"] + counts["rejects"], str(counts))
+        ok &= _check("bad rows were quarantined", counts["rejects"] > 0,
+                     f"{counts['rejects']} rows")
 
-        # ON CONFLICT upsert semantics are shared SQL; confirm they behave.
-        before = len(rows)
+        reasons = {r["reason"] for r in store.query(
+            "SELECT DISTINCT reason FROM silver.silver_rejects")}
+        ok &= _check("quarantine reasons are recorded",
+                     {"distance_non_positive", "hr_out_of_range", "duration_missing",
+                      "unsupported_schema"} <= reasons, ", ".join(sorted(reasons)))
+
+        # The property most likely to break silently: missing HR must stay NULL.
+        gold = store.query(
+            "SELECT COUNT(*) FILTER (WHERE avg_hr IS NULL) AS null_hr, "
+            "COUNT(*) FILTER (WHERE avg_hr = 0) AS zero_hr, "
+            "COUNT(*) FILTER (WHERE avg_hr IS NULL AND trimp IS NOT NULL) AS trimp_without_hr, "
+            "COUNT(DISTINCT sport_group) AS sports FROM gold.fct_activities")[0]
+        ok &= _check("missing HR reads back as NULL", gold["null_hr"] > 0,
+                     f"{gold['null_hr']} rows")
+        ok &= _check("no HR was coerced to zero", gold["zero_hr"] == 0)
+        ok &= _check("no load invented for activities without HR", gold["trimp_without_hr"] == 0)
+        ok &= _check("several sport groups present", gold["sports"] >= 3,
+                     f"{gold['sports']} groups")
+
+        # Re-ingesting unchanged data must not rewrite bronze.
         result = run_ingest(store, SyntheticSource())
-        after = len(load_silver(store))
         ok &= _check("rerun is idempotent (no bronze writes)",
                      result.rows_bronze == 0, f"bronze_changed={result.rows_bronze}")
-        ok &= _check("rerun did not duplicate rows", before == after,
-                     f"{before} -> {after}")
 
-        # Quarantine survived the backend too.
-        rejects = store.query("SELECT COUNT(*) AS n FROM silver_rejects")
-        ok &= _check("rejects were quarantined", rejects[0]["n"] > 0,
-                     f"{rejects[0]['n']} rows")
-
-        # rebuild_silver reprocesses from bronze without contacting the source.
-        rebuilt = rebuild_silver(store, "synthetic")
-        ok &= _check("rebuild_silver succeeds", rebuilt.status == "success",
-                     f"silver={rebuilt.rows_silver}")
+        # The coach tools must run on the gold tables dbt actually built.
+        coverage = call_tool(store, "data_coverage")
+        ok &= _check("coverage tool reads gold", coverage["activity_count"] > 0,
+                     f"{coverage['activity_count']} activities")
+        for name, kwargs in (("window", {"days": 28}), ("workload", {}),
+                             ("recent_activities", {}), ("sport_breakdown", {"days": 90}),
+                             ("weekly_volume", {"weeks": 8}), ("longest_run", {}),
+                             ("trend", {"days": 28})):
+            facts = call_tool(store, name, **kwargs)
+            ok &= _check(f"tool {name} runs", isinstance(facts, dict) and "tool" in facts)
 
     except Exception as exc:  # noqa: BLE001 - report and fail the CI job
         print(f"  [FAIL] unexpected error: {type(exc).__name__}: {exc}")

@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw payloads written by Python ingestion (corach.ingest). Never edited by dbt.
+    schema: public
+    tables:
+      - name: bronze_activities
+        columns:
+          - name: activity_id
+            data_tests: [unique, not_null]
+          - name: payload
+            data_tests: [not_null]

@@ -1,0 +1,26 @@
+name: corach
+version: "1.0.0"
+config-version: 2
+profile: corach
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+# Fitness-metric assumptions. Override per run:  --vars '{max_hr: 195}'
+# See README "Metric definitions" for what each one does.
+vars:
+  rest_hr: 45        # resting heart rate (bpm); COROS reports 45 for this athlete
+  max_hr: 190        # maximum heart rate (bpm). ASSUMPTION: set your measured value.
+  trimp_a: 0.64      # Banister TRIMP coefficients; 0.64 / 1.92 are the male values,
+  trimp_b: 1.92      # use 0.86 / 1.67 for female.
+  acwr_min_days: 28  # no ACWR until this much history exists
+
+models:
+  corach:
+    silver:
+      +schema: silver
+      +materialized: table
+    gold:
+      +schema: gold
+      +materialized: table

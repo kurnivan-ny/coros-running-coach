@@ -1,0 +1,16 @@
+# Connection comes from libpq environment variables, never from this file.
+# `python -m corach.transform_run` expands DATABASE_URL into these for you.
+corach:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('PGHOST') }}"
+      port: "{{ env_var('PGPORT', '5432') | as_number }}"
+      user: "{{ env_var('PGUSER') }}"
+      password: "{{ env_var('PGPASSWORD') }}"
+      dbname: "{{ env_var('PGDATABASE') }}"
+      schema: public
+      sslmode: "{{ env_var('PGSSLMODE', 'require') }}"
+      connect_timeout: 30
+      threads: 4

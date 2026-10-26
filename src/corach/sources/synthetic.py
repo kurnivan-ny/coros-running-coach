@@ -1,6 +1,8 @@
 """SYNTHETIC activity generator. Deterministic, and NOT real athlete data.
 
-Includes deliberately bad rows so the quarantine path is exercised by default.
+Emits the same ``coros_record_v1`` payloads as the real snapshot source, across
+several sports, so dbt silver and gold run on it unchanged. Includes deliberately
+bad rows so the quarantine path is exercised by default.
 """
 
 from __future__ import annotations
@@ -10,13 +12,13 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..transform import SCHEMA_V1
+from .coros_snapshot import SCHEMA
 
 SYNTHETIC_MARKER = "SYNTHETIC"
 
 
 class SyntheticSource:
-    """Generates reproducible fake runs. ``name`` is recorded in every row."""
+    """Generates reproducible fake activities. ``name`` is recorded in every row."""
 
     name = "synthetic"
 
@@ -27,56 +29,69 @@ class SyntheticSource:
         self.include_bad_rows = include_bad_rows
         self.reference = reference or datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
 
+    @staticmethod
+    def _record(activity_id: str, start: datetime, sport_type: int, sport_name: str,
+                duration_s: float | None, distance_m: float | None, avg_hr: int | None,
+                sets: int | None = None, schema: str = SCHEMA) -> dict[str, Any]:
+        start_ts = int(start.timestamp())
+        return {
+            "schema": schema,
+            "activity_id": activity_id,
+            "sport_type": sport_type,
+            "sport_name": sport_name,
+            "activity_date": start.date().isoformat(),
+            "start_ts": start_ts,
+            "end_ts": start_ts + int(duration_s or 0),
+            "location": SYNTHETIC_MARKER,
+            "start_lat": None,
+            "start_lon": None,
+            "duration_s": duration_s,
+            "distance_m": distance_m,
+            "sets": sets,
+            "reported_pace_s_per_km": None,
+            "avg_hr": avg_hr,
+            "calories": None,
+        }
+
     def _good_rows(self) -> list[dict[str, Any]]:
         rng = random.Random(self.seed)
         rows: list[dict[str, Any]] = []
         for day_offset in range(self.days):
             day = self.reference - timedelta(days=day_offset)
-            # ~4 runs a week, and a deliberate gap so zero-run weeks are testable.
-            if rng.random() > 0.57 or 30 <= day_offset < 44:
+            # A deliberate gap so zero-activity weeks are testable.
+            if 30 <= day_offset < 44:
                 continue
-            distance_km = round(rng.uniform(4.0, 18.0), 2)
-            pace_s_per_km = rng.uniform(290, 365)
-            duration_s = round(distance_km * pace_s_per_km, 1)
-            # ~20% of runs have no HR: watch was not worn / strap dropped.
-            avg_hr = None if rng.random() < 0.2 else round(rng.uniform(132, 171), 1)
             start = day.replace(hour=rng.randint(5, 19), minute=rng.randint(0, 59),
                                 second=0, microsecond=0)
-            rows.append({
-                "schema": SCHEMA_V1,
-                "activity_id": f"syn-{start.date().isoformat()}-{day_offset}",
-                "start_time": start.isoformat(),
-                "distance_m": round(distance_km * 1000, 1),
-                "duration_s": duration_s,
-                "avg_hr": avg_hr,
-                "note": SYNTHETIC_MARKER,
-            })
+            roll = rng.random()
+            aid = f"syn-{start.date().isoformat()}-{day_offset}"
+            if roll < 0.50:
+                distance_km = round(rng.uniform(4.0, 18.0), 2)
+                duration = round(distance_km * rng.uniform(290, 365))
+                # ~20% have no HR: watch was not worn / strap dropped.
+                hr = None if rng.random() < 0.2 else rng.randint(132, 171)
+                rows.append(self._record(aid, start, 100, "Outdoor Run", duration,
+                                         distance_km * 1000, hr))
+            elif roll < 0.68:
+                rows.append(self._record(aid, start, 402, "Strength",
+                                         rng.randint(1500, 3600), None, rng.randint(95, 125),
+                                         sets=rng.randint(8, 24)))
+            elif roll < 0.76:
+                distance_km = round(rng.uniform(2.0, 6.0), 2)
+                rows.append(self._record(aid, start, 900, "Walk",
+                                         round(distance_km * rng.uniform(600, 780)),
+                                         distance_km * 1000, rng.randint(95, 118)))
         return rows
 
     def _bad_rows(self) -> list[dict[str, Any]]:
         """Rows that must be quarantined, one per failure mode."""
         base = self.reference.replace(hour=7, minute=0, second=0, microsecond=0)
         return [
-            {  # zero distance -> distance_non_positive
-                "schema": SCHEMA_V1, "activity_id": "syn-bad-zero-distance",
-                "start_time": base.isoformat(), "distance_m": 0,
-                "duration_s": 1800, "avg_hr": 150, "note": SYNTHETIC_MARKER,
-            },
-            {  # absurd HR -> hr_out_of_range
-                "schema": SCHEMA_V1, "activity_id": "syn-bad-hr",
-                "start_time": base.isoformat(), "distance_m": 10000,
-                "duration_s": 3000, "avg_hr": 900, "note": SYNTHETIC_MARKER,
-            },
-            {  # duration absent -> duration_missing (NOT treated as 0)
-                "schema": SCHEMA_V1, "activity_id": "syn-bad-no-duration",
-                "start_time": base.isoformat(), "distance_m": 8000,
-                "duration_s": None, "avg_hr": 145, "note": SYNTHETIC_MARKER,
-            },
-            {  # unknown schema -> rejected by the parser
-                "schema": "coros_unknown_v9", "activity_id": "syn-bad-schema",
-                "start_time": base.isoformat(), "distance_m": 5000,
-                "duration_s": 1500, "note": SYNTHETIC_MARKER,
-            },
+            self._record("syn-bad-zero-distance", base, 100, "Outdoor Run", 1800, 0, 150),
+            self._record("syn-bad-hr", base, 100, "Outdoor Run", 3000, 10000, 900),
+            self._record("syn-bad-no-duration", base, 100, "Outdoor Run", None, 8000, 145),
+            self._record("syn-bad-schema", base, 100, "Outdoor Run", 1500, 5000, None,
+                         schema="coros_unknown_v9"),
         ]
 
     def fetch(self, since: str | None = None) -> Iterable[dict[str, Any]]:
@@ -84,5 +99,5 @@ class SyntheticSource:
         if self.include_bad_rows:
             rows += self._bad_rows()
         if since:
-            rows = [r for r in rows if str(r.get("start_time", ""))[:10] >= since[:10]]
-        return sorted(rows, key=lambda r: str(r.get("start_time", "")))
+            rows = [r for r in rows if str(r.get("activity_date", "")) >= since[:10]]
+        return sorted(rows, key=lambda r: (str(r["activity_date"]), r["activity_id"]))

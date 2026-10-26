@@ -1,36 +1,22 @@
-"""Ingestion behaviour: idempotency, incrementality, retries, quarantine."""
+"""Bronze ingestion: idempotency, incrementality, retries, migration, DSN handling."""
 
 from __future__ import annotations
 
+import threading
 import unittest
 from typing import Any
 
-from corach.ingest import (
-    _fetch_with_retry,
-    get_watermark,
-    load_silver,
-    rebuild_silver,
-    run_ingest,
-)
+from corach.ingest import _fetch_with_retry, get_watermark, payload_hash, run_ingest
 from corach.sources import PermanentSourceError, TransientSourceError
-from corach.sources.coros_mcp import CorosMCPSource
 from corach.sources.synthetic import SyntheticSource
-from corach.store import Store
-from corach.transform import SCHEMA_V1
-
-
-def activity(aid: str, start: str, dist: float = 10000.0,
-             dur: float = 3000.0, hr: float | None = 150.0) -> dict[str, Any]:
-    return {
-        "schema": SCHEMA_V1, "activity_id": aid, "start_time": start,
-        "distance_m": dist, "duration_s": dur, "avg_hr": hr,
-    }
+from corach.store import Store, dsn_from_env
+from helpers import record
 
 
 class ListSource:
     """Source backed by a fixed list; records the `since` it was asked for."""
 
-    name = "synthetic"
+    name = "coros_snapshot"
 
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
@@ -39,14 +25,14 @@ class ListSource:
     def fetch(self, since: str | None = None):
         self.calls.append(since)
         if since:
-            return [r for r in self.rows if str(r["start_time"])[:10] >= since[:10]]
+            return [r for r in self.rows if str(r["activity_date"]) >= since[:10]]
         return list(self.rows)
 
 
 class FlakySource:
     """Fails with the given exceptions, then succeeds."""
 
-    name = "synthetic"
+    name = "coros_snapshot"
 
     def __init__(self, failures: int, exc: type[Exception] = TransientSourceError) -> None:
         self.failures = failures
@@ -57,7 +43,7 @@ class FlakySource:
         self.attempts += 1
         if self.attempts <= self.failures:
             raise self.exc(f"boom {self.attempts}")
-        return [activity("ok-1", "2026-10-01T06:00:00+00:00")]
+        return [record("ok-1", "2026-10-01")]
 
 
 class IngestTest(unittest.TestCase):
@@ -68,57 +54,61 @@ class IngestTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
 
+    def bronze(self) -> list[dict[str, Any]]:
+        return self.store.query("SELECT * FROM bronze_activities ORDER BY activity_id")
+
     def test_rerun_is_idempotent(self) -> None:
         src = SyntheticSource(days=40)
         first = run_ingest(self.store, src)
         second = run_ingest(self.store, src)
 
         self.assertEqual(first.status, "success")
-        # Nothing changed upstream, so no bronze row should be rewritten.
-        self.assertEqual(second.rows_bronze, 0)
-        self.assertEqual(len(load_silver(self.store)), first.rows_silver)
+        self.assertGreater(first.rows_bronze, 0)
+        self.assertEqual(second.rows_bronze, 0)  # nothing changed upstream
 
-    def test_changed_payload_updates_bronze_and_silver(self) -> None:
-        row = activity("run-1", "2026-10-01T06:00:00+00:00", dist=10000.0)
-        src = ListSource([row])
+    def test_changed_payload_updates_bronze(self) -> None:
+        src = ListSource([record("run-1", "2026-10-01", distance_m=10000.0)])
         run_ingest(self.store, src)
 
-        # Same id, corrected distance upstream.
-        src.rows = [activity("run-1", "2026-10-01T06:00:00+00:00", dist=12345.0)]
+        src.rows = [record("run-1", "2026-10-01", distance_m=12345.0)]
         second = run_ingest(self.store, src, full_refresh=True)
 
         self.assertEqual(second.rows_bronze, 1)
-        silver = load_silver(self.store)
-        self.assertEqual(len(silver), 1)
-        self.assertAlmostEqual(silver[0]["distance_m"], 12345.0)
+        rows = self.bronze()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("12345", rows[0]["payload"])
 
-    def test_unchanged_payload_leaves_bronze_hash_untouched(self) -> None:
-        src = ListSource([activity("run-1", "2026-10-01T06:00:00+00:00")])
+    def test_unchanged_payload_leaves_bronze_untouched(self) -> None:
+        src = ListSource([record("run-1", "2026-10-01")])
         run_ingest(self.store, src)
-        before = self.store.query("SELECT updated_at FROM bronze_activities")[0]["updated_at"]
+        before = self.bronze()[0]["updated_at"]
         run_ingest(self.store, src, full_refresh=True)
-        after = self.store.query("SELECT updated_at FROM bronze_activities")[0]["updated_at"]
-        self.assertEqual(before, after)
+        self.assertEqual(before, self.bronze()[0]["updated_at"])
 
     def test_incremental_fetch_uses_watermark_with_overlap(self) -> None:
-        src = ListSource([
-            activity("a", "2026-10-01T06:00:00+00:00"),
-            activity("b", "2026-10-10T06:00:00+00:00"),
-        ])
+        src = ListSource([record("a", "2026-10-01"), record("b", "2026-10-10")])
         run_ingest(self.store, src)
         self.assertIsNone(src.calls[0])  # first run has no watermark
 
         run_ingest(self.store, src, overlap_days=3)
-        # Watermark is 2026-10-10; overlap of 3 days means asking from 10-07.
-        self.assertEqual(src.calls[1], "2026-10-07")
+        self.assertEqual(src.calls[1], "2026-10-07")  # watermark 10-10 minus 3 days
 
-    def test_watermark_tracks_latest_activity(self) -> None:
-        src = ListSource([
-            activity("a", "2026-10-01T06:00:00+00:00"),
-            activity("b", "2026-10-09T06:00:00+00:00"),
-        ])
+    def test_watermark_tracks_latest_activity_date(self) -> None:
+        src = ListSource([record("a", "2026-10-01"), record("b", "2026-10-09")])
         run_ingest(self.store, src)
-        self.assertEqual(get_watermark(self.store, "synthetic"), "2026-10-09")
+        self.assertEqual(get_watermark(self.store, "coros_snapshot"), "2026-10-09")
+
+    def test_watermark_is_per_source(self) -> None:
+        run_ingest(self.store, ListSource([record("a", "2026-10-01")]))
+        self.assertIsNone(get_watermark(self.store, "synthetic"))
+
+    def test_bad_payloads_are_stored_not_dropped(self) -> None:
+        # Validation is dbt's job; bronze must keep everything it was given.
+        result = run_ingest(self.store, SyntheticSource(days=20))
+        ids = {r["activity_id"] for r in self.bronze()}
+        self.assertEqual(result.rows_bronze, len(ids))
+        self.assertIn("syn-bad-zero-distance", ids)
+        self.assertIn("syn-bad-schema", ids)
 
     def test_retry_succeeds_after_transient_errors(self) -> None:
         src = FlakySource(failures=2)
@@ -146,64 +136,22 @@ class IngestTest(unittest.TestCase):
         self.assertIn("TransientSourceError", runs[0]["error"])
 
     def test_successful_run_is_logged(self) -> None:
-        run_ingest(self.store, ListSource([activity("a", "2026-10-01T06:00:00+00:00")]))
-        runs = self.store.query("SELECT status, rows_silver, finished_at FROM ops_pipeline_runs")
+        run_ingest(self.store, ListSource([record("a", "2026-10-01")]))
+        runs = self.store.query(
+            "SELECT status, rows_fetched, rows_bronze, finished_at FROM ops_pipeline_runs")
         self.assertEqual(runs[0]["status"], "success")
-        self.assertEqual(runs[0]["rows_silver"], 1)
+        self.assertEqual((runs[0]["rows_fetched"], runs[0]["rows_bronze"]), (1, 1))
         self.assertIsNotNone(runs[0]["finished_at"])
-
-    def test_bad_rows_are_quarantined_with_reasons(self) -> None:
-        result = run_ingest(self.store, SyntheticSource(days=20))
-        rejects = self.store.query("SELECT activity_id, reason FROM silver_rejects")
-        reasons = {r["reason"] for r in rejects}
-
-        self.assertEqual(result.rows_rejected, 4)
-        self.assertIn("distance_non_positive", reasons)
-        self.assertIn("hr_out_of_range", reasons)
-        self.assertIn("duration_missing", reasons)
-        self.assertTrue(any("SchemaError" in r for r in reasons))
-        # Quarantined rows must never reach silver.
-        ids = {r["activity_id"] for r in load_silver(self.store)}
-        self.assertNotIn("syn-bad-zero-distance", ids)
-
-    def test_null_hr_survives_the_round_trip(self) -> None:
-        src = ListSource([
-            activity("with-hr", "2026-10-01T06:00:00+00:00", hr=150.0),
-            activity("no-hr", "2026-10-02T06:00:00+00:00", hr=None),
-        ])
-        run_ingest(self.store, src)
-        rows = {r["activity_id"]: r["avg_hr"] for r in load_silver(self.store)}
-
-        self.assertEqual(rows["with-hr"], 150.0)
-        self.assertIsNone(rows["no-hr"])  # must be NULL, never 0
-
-    def test_rebuild_silver_reprocesses_from_bronze(self) -> None:
-        src = ListSource([activity("a", "2026-10-01T06:00:00+00:00")])
-        run_ingest(self.store, src)
-        self.store.execute("DELETE FROM silver_activities")
-        self.store.commit()
-        self.assertEqual(len(load_silver(self.store)), 0)
-
-        result = rebuild_silver(self.store, "synthetic")
-        self.assertEqual(result.status, "success")
-        self.assertEqual(len(load_silver(self.store)), 1)
-
-    def test_coros_mcp_stub_fails_loudly(self) -> None:
-        with self.assertRaises(PermanentSourceError) as ctx:
-            list(CorosMCPSource().fetch())
-        self.assertIn("not implemented", str(ctx.exception).lower())
 
     def test_store_is_usable_from_another_thread(self) -> None:
         # Regression: Streamlit caches one Store and reruns the script on worker
         # threads, so a thread-bound SQLite connection raised ProgrammingError.
-        import threading
-
-        run_ingest(self.store, ListSource([activity("a", "2026-10-01T06:00:00+00:00")]))
+        run_ingest(self.store, ListSource([record("a", "2026-10-01")]))
         captured: list[object] = []
 
         def read() -> None:
             try:
-                captured.append(len(load_silver(self.store)))
+                captured.append(len(self.bronze()))
             except Exception as exc:  # noqa: BLE001 - recorded for the assertion
                 captured.append(exc)
 
@@ -217,6 +165,62 @@ class IngestTest(unittest.TestCase):
         with self.assertRaises(TransientSourceError):
             _fetch_with_retry(src, None, max_attempts=4, sleep=lambda _: None)
         self.assertEqual(src.attempts, 4)
+
+    def test_payload_hash_ignores_key_order(self) -> None:
+        self.assertEqual(payload_hash({"a": 1, "b": 2}), payload_hash({"b": 2, "a": 1}))
+        self.assertNotEqual(payload_hash({"a": 1}), payload_hash({"a": 2}))
+
+
+class MigrationTest(unittest.TestCase):
+    def test_old_database_is_upgraded_in_place(self) -> None:
+        store = Store(":memory:")
+        conn = store.connect()
+        conn.executescript(
+            "CREATE TABLE bronze_activities (activity_id TEXT PRIMARY KEY, source TEXT NOT NULL,"
+            " payload TEXT NOT NULL, payload_hash TEXT NOT NULL, fetched_at TEXT NOT NULL,"
+            " updated_at TEXT NOT NULL);"
+            "CREATE TABLE silver_activities (activity_id TEXT);"
+            "CREATE TABLE silver_rejects (activity_id TEXT);"
+        )
+        store.init_schema()
+
+        cols = {r["name"] for r in store.query("PRAGMA table_info(bronze_activities)")}
+        tables = {r["name"] for r in store.query(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("activity_date", cols)
+        # On SQLite the table name is shared with the dbt model, so it must survive.
+        self.assertIn("silver_rejects", tables)
+        store.init_schema()  # and the migration is repeatable
+        store.close()
+
+
+class DsnFromEnvTest(unittest.TestCase):
+    def test_database_url_wins(self) -> None:
+        env = {"DATABASE_URL": "postgresql://u:p@h/d", "PGHOST": "other"}
+        self.assertEqual(dsn_from_env(env), "postgresql://u:p@h/d")
+
+    def test_assembled_from_pg_variables_with_escaping(self) -> None:
+        env = {"PGHOST": "h.neon.tech", "PGUSER": "me", "PGPASSWORD": "p@ss/w:rd",
+               "PGDATABASE": "db"}
+        self.assertEqual(dsn_from_env(env),
+                         "postgresql://me:p%40ss%2Fw%3Ard@h.neon.tech:5432/db?sslmode=require")
+
+    def test_incomplete_pg_variables_fall_back_to_sqlite(self) -> None:
+        self.assertEqual(dsn_from_env({"PGHOST": "h", "PGUSER": "u"}), "")
+
+
+
+class DsnSafetyTest(unittest.TestCase):
+    def test_surrounding_quotes_are_tolerated(self) -> None:
+        self.assertEqual(dsn_from_env({"DATABASE_URL": "'postgresql://u:p@h/d'"}),
+                         "postgresql://u:p@h/d")
+        self.assertEqual(dsn_from_env({"DATABASE_URL": ' "postgresql://u:p@h/d" '}),
+                         "postgresql://u:p@h/d")
+
+    def test_unsupported_scheme_is_refused_without_echoing_it(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            Store("mysql://user:hunter2@host/db")
+        self.assertNotIn("hunter2", str(ctx.exception))
 
 
 if __name__ == "__main__":

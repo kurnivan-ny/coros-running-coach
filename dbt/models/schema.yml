@@ -1,0 +1,57 @@
+version: 2
+
+models:
+  - name: silver_activities
+    description: Validated activities, all sports. One row per bronze payload that passed every rule.
+    columns:
+      - name: activity_id
+        data_tests: [unique, not_null]
+      - name: sport_group
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [run, hike, cycling, swim, strength, walk, mobility, other]
+      - name: local_date
+        data_tests: [not_null]
+      - name: duration_s
+        data_tests: [not_null]
+
+  - name: silver_rejects
+    description: Quarantined payloads with the first rule they failed.
+    columns:
+      - name: reason
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [unsupported_schema, missing_activity_id, sport_missing, bad_start_time,
+                         missing_date, duration_missing, duration_non_positive,
+                         duration_out_of_range, distance_missing, distance_non_positive,
+                         distance_out_of_range, hr_out_of_range, pace_implausible,
+                         duplicate_activity]
+
+  - name: fct_activities
+    description: Validated activities plus week bucket and TRIMP load.
+    columns:
+      - name: activity_id
+        data_tests: [unique, not_null]
+      - name: week_start
+        data_tests: [not_null]
+
+  - name: daily_load
+    description: Gap-free daily series with acute/chronic load, ACWR, monotony and strain.
+    columns:
+      - name: day
+        data_tests: [unique, not_null]
+      - name: acwr_zone
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [insufficient_history, undertraining, optimal, caution, high_risk]
+
+  - name: weekly_summary
+    description: Per ISO week and sport group totals.
+    columns:
+      - name: week_start
+        data_tests: [not_null]

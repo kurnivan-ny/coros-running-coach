@@ -8,6 +8,7 @@ callers write ``?`` everywhere.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Sequence
@@ -16,35 +17,17 @@ from pathlib import Path
 from typing import Any
 
 # JSON column type differs: Postgres has native jsonb, SQLite stores TEXT.
+# Only the bronze and ops tables live here. Silver and gold are dbt models (see
+# dbt/), built in the ``silver`` and ``gold`` Postgres schemas.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bronze_activities (
-    activity_id   TEXT PRIMARY KEY,
-    source        TEXT NOT NULL,
-    payload       {json_type} NOT NULL,
-    payload_hash  TEXT NOT NULL,
-    fetched_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS silver_activities (
     activity_id    TEXT PRIMARY KEY,
     source         TEXT NOT NULL,
-    start_time_utc TEXT NOT NULL,
-    start_date_utc TEXT NOT NULL,
-    distance_m     REAL NOT NULL,
-    duration_s     REAL NOT NULL,
-    avg_hr         REAL,
+    activity_date  TEXT,
+    payload        {json_type} NOT NULL,
     payload_hash   TEXT NOT NULL,
+    fetched_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS silver_rejects (
-    activity_id  TEXT NOT NULL,
-    source       TEXT NOT NULL,
-    reason       TEXT NOT NULL,
-    payload      {json_type},
-    rejected_at  TEXT NOT NULL,
-    PRIMARY KEY (activity_id, reason)
 );
 
 CREATE TABLE IF NOT EXISTS ops_pipeline_runs (
@@ -60,17 +43,45 @@ CREATE TABLE IF NOT EXISTS ops_pipeline_runs (
     watermark      TEXT,
     error          TEXT
 );
-
-CREATE INDEX IF NOT EXISTS idx_silver_start ON silver_activities (start_date_utc);
 """
+
+# Silver used to be Python-built tables in the public schema; dbt owns it now.
+_LEGACY_TABLES = ("silver_activities", "silver_rejects")
+
+
+_SCHEMA_PREFIX = re.compile(r"\b(?:gold|silver)\.(?=[a-z_])")
+
+
+def dsn_from_env(env: Any = None) -> str:
+    """Postgres DSN from ``DATABASE_URL``, else assembled from libpq ``PG*`` variables.
+
+    Returns ``""`` when neither is configured, which selects SQLite. ``sslmode`` is
+    forced to ``require`` for the assembled form because Neon rejects plaintext.
+    """
+    env = os.environ if env is None else env
+    # Tolerate the quotes people copy along with a connection string.
+    url = (env.get("DATABASE_URL") or "").strip().strip("'\"").strip()
+    if url:
+        return url
+    host, user, password, dbname = (env.get(k) for k in
+                                    ("PGHOST", "PGUSER", "PGPASSWORD", "PGDATABASE"))
+    if not (host and user and password and dbname):
+        return ""
+    from urllib.parse import quote
+    port = env.get("PGPORT") or "5432"
+    return (f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}"
+            f"@{host}:{port}/{dbname}?sslmode={env.get('PGSSLMODE') or 'require'}")
 
 
 class Store:
     """Database handle. ``dsn`` picks the backend: ``postgresql://`` or a file path."""
 
     def __init__(self, dsn: str | None = None) -> None:
-        dsn = dsn or os.environ.get("DATABASE_URL") or ""
+        dsn = dsn or dsn_from_env()
         self.is_postgres = dsn.startswith(("postgresql://", "postgres://"))
+        if "://" in dsn and not self.is_postgres:
+            # Never echo the value: a connection string carries the password.
+            raise ValueError("database URL must start with postgresql:// (or be a file path)")
         if self.is_postgres:
             self.dsn = dsn
         else:
@@ -113,8 +124,15 @@ class Store:
 
     # -- sql --------------------------------------------------------------
     def _adapt(self, sql: str) -> str:
-        """SQLite dialect is canonical; rewrite placeholders for Postgres."""
-        return sql.replace("?", "%s") if self.is_postgres else sql
+        """SQLite dialect is canonical; rewrite placeholders for Postgres.
+
+        dbt builds ``silver`` and ``gold`` as Postgres schemas. SQLite has none, so
+        there the prefixes are dropped and the same SQL runs against fixture tables
+        in tests and demos.
+        """
+        if self.is_postgres:
+            return sql.replace("?", "%s")
+        return _SCHEMA_PREFIX.sub("", sql)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         with self._lock:
@@ -170,7 +188,27 @@ class Store:
                     cur.execute(sql)
             else:
                 conn.executescript(sql)
+            self._migrate()
             self.commit()
+
+    def _migrate(self) -> None:
+        """Bring a database created by an older version up to the current schema."""
+        if self.is_postgres:
+            self.execute("ALTER TABLE bronze_activities "
+                         "ADD COLUMN IF NOT EXISTS activity_date TEXT")
+        else:
+            cols = {r["name"] for r in self.query("PRAGMA table_info(bronze_activities)")}
+            if "activity_date" not in cols:
+                self.execute("ALTER TABLE bronze_activities ADD COLUMN activity_date TEXT")
+        # After the column exists: an older database gets it from the ALTER above.
+        self.execute("CREATE INDEX IF NOT EXISTS idx_bronze_source_date "
+                     "ON bronze_activities (source, activity_date)")
+        # Postgres only: there the old tables sit in ``public`` while dbt writes to the
+        # ``silver`` schema. SQLite has no schemas, so the names would collide with the
+        # dbt-shaped tables used in tests and demos.
+        if self.is_postgres:
+            for table in _LEGACY_TABLES:
+                self.execute(f"DROP TABLE IF EXISTS public.{table}")  # nosec B608 - constants
 
 
 # -- shared upsert statements ---------------------------------------------
@@ -178,36 +216,14 @@ class Store:
 # not mark unchanged rows as updated.
 UPSERT_BRONZE = """
 INSERT INTO bronze_activities
-    (activity_id, source, payload, payload_hash, fetched_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+    (activity_id, source, activity_date, payload, payload_hash, fetched_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (activity_id) DO UPDATE SET
-    payload      = EXCLUDED.payload,
-    payload_hash = EXCLUDED.payload_hash,
-    fetched_at   = EXCLUDED.fetched_at,
-    updated_at   = EXCLUDED.updated_at
+    source        = EXCLUDED.source,
+    activity_date = EXCLUDED.activity_date,
+    payload       = EXCLUDED.payload,
+    payload_hash  = EXCLUDED.payload_hash,
+    fetched_at    = EXCLUDED.fetched_at,
+    updated_at    = EXCLUDED.updated_at
 WHERE bronze_activities.payload_hash <> EXCLUDED.payload_hash
-"""
-
-UPSERT_SILVER = """
-INSERT INTO silver_activities
-    (activity_id, source, start_time_utc, start_date_utc,
-     distance_m, duration_s, avg_hr, payload_hash, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (activity_id) DO UPDATE SET
-    source         = EXCLUDED.source,
-    start_time_utc = EXCLUDED.start_time_utc,
-    start_date_utc = EXCLUDED.start_date_utc,
-    distance_m     = EXCLUDED.distance_m,
-    duration_s     = EXCLUDED.duration_s,
-    avg_hr         = EXCLUDED.avg_hr,
-    payload_hash   = EXCLUDED.payload_hash,
-    updated_at     = EXCLUDED.updated_at
-"""
-
-UPSERT_REJECT = """
-INSERT INTO silver_rejects (activity_id, source, reason, payload, rejected_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (activity_id, reason) DO UPDATE SET
-    payload     = EXCLUDED.payload,
-    rejected_at = EXCLUDED.rejected_at
 """
