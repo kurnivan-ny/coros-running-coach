@@ -166,7 +166,7 @@ was paused.
 
 **Load (TRIMP, Banister).** `minutes × HRr × 0.64 × e^(1.92 × HRr)` with
 `HRr = (avg_hr − rest_hr) / (max_hr − rest_hr)` clamped to 0–1. Resting HR is 45 (the
-value COROS reports for this athlete). **Maximum HR is an assumption (190); set your
+value COROS reports for this athlete). **Maximum HR is an estimate (193 = 220 − age 27); set your
 measured value** in `dbt/dbt_project.yml` and rebuild. The 0.64/1.92 constants are the
 male values; use 0.86/1.67 for female. It uses *average* heart rate, so it understates
 interval and strength sessions. An activity without HR gets NULL load, not zero.

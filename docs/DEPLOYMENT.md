@@ -232,7 +232,7 @@ PYTHONPATH=src python -m corach.transform_run
 
 ### Change the load assumptions
 
-Maximum heart rate (default 190, an assumption) and resting heart rate are in
+Maximum heart rate (default 193, estimated as 220 minus age 27) and resting heart rate are in
 `dbt/dbt_project.yml`. Set your measured values and rebuild, or one-off:
 
 ```bash
