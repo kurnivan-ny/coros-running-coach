@@ -1,7 +1,7 @@
 streamlit==1.66.0
 plotly==6.9.0
 pandas==2.3.3
-psycopg[binary]==3.2.3
+psycopg[binary]==3.3.6
 
 # Transitive (via streamlit). Pinned to a floor that clears the pillow CVEs
 # reported by pip-audit against streamlit's older dependency range.
