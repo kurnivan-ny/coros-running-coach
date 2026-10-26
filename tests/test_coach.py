@@ -1,19 +1,15 @@
-"""Coach tools, router, number guard, and the LLM client (fake transport only)."""
+"""Coach tools (against hand-written gold rows), router, number guard, LLM client."""
 
 from __future__ import annotations
 
 import json
 import unittest
 import urllib.error
+import urllib.request
 from datetime import date
 from typing import Any
 
-from corach.coach.chat import (
-    answer,
-    extract_numbers,
-    guard_llm_answer,
-    route,
-)
+from corach.coach.chat import answer, extract_numbers, guard_llm_answer, route
 from corach.coach.llm import (
     LLMClient,
     LLMConfig,
@@ -22,39 +18,28 @@ from corach.coach.llm import (
     validate_base_url,
 )
 from corach.coach.tools import TOOLS, ToolArgumentError, bounded_int, call_tool
-from corach.ingest import run_ingest
-from corach.store import Store
-from corach.transform import SCHEMA_V1
+from helpers import add_activity, add_load, add_weekly, gold_store
 
-TODAY = date(2026, 10, 17)
+TODAY = date(2026, 10, 14)  # a Wednesday
 
 
-def activity(aid: str, day: str, dist: float = 10000.0,
-             dur: float = 3000.0, hr: float | None = 150.0) -> dict[str, Any]:
-    return {
-        "schema": SCHEMA_V1, "activity_id": aid, "start_time": f"{day}T06:00:00+00:00",
-        "distance_m": dist, "duration_s": dur, "avg_hr": hr,
-    }
-
-
-class FixedSource:
-    name = "synthetic"
-
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self.rows = rows
-
-    def fetch(self, since: str | None = None):
-        return list(self.rows)
-
-
-def seeded_store(rows: list[dict[str, Any]] | None = None) -> Store:
-    store = Store(":memory:")
-    store.init_schema()
-    run_ingest(store, FixedSource(rows if rows is not None else [
-        activity("a", "2026-10-13", 10000.0, 3000.0, 150.0),
-        activity("b", "2026-10-15", 12000.0, 3900.0, None),
-        activity("c", "2026-09-20", 21000.0, 7200.0, 160.0),
-    ]))
+def seeded_store():
+    store = gold_store()
+    add_activity(store, "a", "2026-10-13", distance_km=10.0, duration_min=50, avg_hr=150, trimp=60)
+    add_activity(store, "b", "2026-10-12", distance_km=12.0, duration_min=65, avg_hr=None,
+                 trimp=None)
+    add_activity(store, "c", "2026-09-20", distance_km=21.0, duration_min=120, avg_hr=160,
+                 trimp=150)
+    add_activity(store, "s1", "2026-10-11", sport="strength", name="Strength",
+                 distance_km=None, duration_min=45, avg_hr=105, sets=20, trimp=15)
+    add_activity(store, "w1", "2026-10-10", sport="walk", name="Walk",
+                 distance_km=3.0, duration_min=40, avg_hr=110, trimp=8)
+    add_weekly(store, "2026-10-05", sessions=3, distance_km=30.0)
+    add_weekly(store, "2026-09-28", sessions=3, distance_km=25.0)
+    add_weekly(store, "2026-09-21", sessions=2, distance_km=20.0)
+    add_weekly(store, "2026-09-14", sessions=3, distance_km=28.0)
+    add_load(store, "2026-10-13", acwr=1.4, zone="caution")
+    add_load(store, "2026-10-14", acute=75.5, chronic=90.0, acwr=0.84, zone="optimal")
     return store
 
 
@@ -96,66 +81,145 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(
             set(TOOLS),
             {"data_coverage", "window", "weekly_volume", "longest_run",
-             "recent_runs", "trend"},
+             "recent_activities", "trend", "sport_breakdown", "workload", "training_plan"},
         )
 
-    def test_data_coverage_flags_synthetic(self) -> None:
-        facts = call_tool(self.store, "data_coverage")
-        self.assertEqual(facts["activity_count"], 3)
-        self.assertTrue(facts["is_synthetic"])
-        self.assertEqual(facts["last_activity_date"], "2026-10-15")
-
-    def test_window_rejects_disallowed_days(self) -> None:
+    def test_sql_in_arguments_is_rejected_not_executed(self) -> None:
         with self.assertRaises(ToolArgumentError):
-            call_tool(self.store, "window", days=14)
+            call_tool(self.store, "window", sport="run; DROP TABLE fct_activities;--")
+        self.assertEqual(call_tool(self.store, "data_coverage")["activity_count"], 5)
 
-    def test_window_reports_null_hr_when_absent(self) -> None:
-        store = seeded_store([activity("x", "2026-10-15", 10000.0, 3000.0, None)])
+    def test_data_coverage(self) -> None:
+        facts = call_tool(self.store, "data_coverage")
+        self.assertEqual(facts["activity_count"], 5)
+        self.assertEqual(facts["sport_counts"], {"run": 3, "strength": 1, "walk": 1})
+        self.assertFalse(facts["is_synthetic"])
+        self.assertEqual(facts["last_activity_date"], "2026-10-13")
+
+    def test_data_coverage_flags_synthetic(self) -> None:
+        add_activity(self.store, "syn", "2026-10-01", source="synthetic")
+        self.assertTrue(call_tool(self.store, "data_coverage")["is_synthetic"])
+
+    def test_window_totals_for_runs(self) -> None:
+        facts = call_tool(self.store, "window", days=7, today=TODAY)
+        self.assertEqual(facts["sessions"], 2)
+        self.assertEqual(facts["distance_km"], 22.0)
+        self.assertEqual(facts["duration_min"], 115.0)
+        # total duration / total distance, not a mean of paces: 6900 s over 22 km
+        self.assertEqual(facts["pace_s_per_km"], 313.6)
+        self.assertEqual(facts["pace_per_km"], "5:14")
+
+    def test_window_hr_is_duration_weighted_and_skips_missing(self) -> None:
+        facts = call_tool(self.store, "window", days=7, today=TODAY)
+        self.assertEqual(facts["avg_hr"], 150)  # only run a reports HR; b is not counted as 0
+
+    def test_window_reports_null_hr_when_none_reported(self) -> None:
+        store = gold_store()
+        add_activity(store, "x", "2026-10-13", avg_hr=None, trimp=None)
         facts = call_tool(store, "window", days=7, today=TODAY)
-        self.assertEqual(facts["runs"], 1)
+        self.assertEqual(facts["sessions"], 1)
         self.assertIsNone(facts["avg_hr"])  # not 0
         store.close()
 
-    def test_window_flags_insufficient_history(self) -> None:
-        facts = call_tool(self.store, "window", days=90, today=TODAY)
-        self.assertFalse(facts["sufficient_history"])
+    def test_window_for_strength_reports_sets_not_pace(self) -> None:
+        facts = call_tool(self.store, "window", days=7, sport="strength", today=TODAY)
+        self.assertEqual(facts["sessions"], 1)
+        self.assertEqual(facts["sets"], 20)
+        self.assertIsNone(facts["pace_s_per_km"])
 
-    def test_longest_run_picks_max_distance(self) -> None:
+    def test_window_rejects_disallowed_days_and_sports(self) -> None:
+        with self.assertRaises(ToolArgumentError):
+            call_tool(self.store, "window", days=14)
+        with self.assertRaises(ToolArgumentError):
+            call_tool(self.store, "window", sport="curling")
+
+    def test_window_flags_insufficient_history(self) -> None:
+        ninety = call_tool(self.store, "window", days=90, today=TODAY)
+        seven = call_tool(self.store, "window", days=7, today=TODAY)
+        self.assertFalse(ninety["sufficient_history"])
+        self.assertTrue(seven["sufficient_history"])
+
+    def test_longest_run_ignores_other_sports(self) -> None:
+        add_activity(self.store, "hike", "2026-10-02", sport="walk", distance_km=40.0)
         facts = call_tool(self.store, "longest_run")
-        self.assertTrue(facts["found"])
-        self.assertAlmostEqual(facts["distance_km"], 21.0)
+        self.assertEqual(facts["distance_km"], 21.0)
+        self.assertEqual(facts["date"], "2026-09-20")
 
     def test_longest_run_on_empty_db(self) -> None:
-        store = Store(":memory:")
-        store.init_schema()
+        store = gold_store()
         self.assertFalse(call_tool(store, "longest_run")["found"])
         store.close()
 
-    def test_recent_runs_limit_is_bounded(self) -> None:
+    def test_recent_activities_limit_sport_filter_and_order(self) -> None:
         with self.assertRaises(ToolArgumentError):
-            call_tool(self.store, "recent_runs", limit=10_000)
-        facts = call_tool(self.store, "recent_runs", limit=2)
-        self.assertEqual(len(facts["runs"]), 2)
-        self.assertEqual(facts["runs"][0]["date"], "2026-10-15")  # newest first
+            call_tool(self.store, "recent_activities", limit=10_000)
+        facts = call_tool(self.store, "recent_activities", limit=2)
+        self.assertEqual([a["date"] for a in facts["activities"]], ["2026-10-13", "2026-10-12"])
+        strength = call_tool(self.store, "recent_activities", sport="strength")
+        self.assertEqual(len(strength["activities"]), 1)
+        self.assertEqual(strength["activities"][0]["sets"], 20)
+
+    def test_trend_compares_adjacent_windows(self) -> None:
+        facts = call_tool(self.store, "trend", days=28, today=TODAY)
+        self.assertEqual(facts["current_km"], 43.0)   # Sep 17..Oct 14 includes the 21 km run
+        self.assertIsNone(facts["change_pct"])        # nothing in the 28 days before that
 
     def test_trend_change_is_none_against_empty_prior_window(self) -> None:
-        store = seeded_store([activity("only", "2026-10-15")])
-        facts = call_tool(store, "trend", days=7, today=TODAY)
-        self.assertIsNone(facts["change_pct"])
+        store = gold_store()
+        add_activity(store, "only", "2026-10-13")
+        self.assertIsNone(call_tool(store, "trend", days=7, today=TODAY)["change_pct"])
         store.close()
 
-    def test_weekly_volume_series_length(self) -> None:
+    def test_weekly_volume_zero_fills_and_reports_last_full_week(self) -> None:
         facts = call_tool(self.store, "weekly_volume", weeks=4, today=TODAY)
         self.assertEqual(len(facts["series"]), 4)
+        self.assertEqual(facts["series"][-1]["sessions"], 0)       # this week: no row
+        self.assertEqual(facts["last_full_week_km"], 30.0)
+        self.assertEqual(facts["week_over_week_pct"], 20.0)        # 30 vs 25
+
+    def test_sport_breakdown(self) -> None:
+        facts = call_tool(self.store, "sport_breakdown", days=7, today=TODAY)
+        sports = {s["sport"]: s for s in facts["sports"]}
+        self.assertEqual(set(sports), {"run", "strength", "walk"})
+        self.assertEqual(sports["run"]["sessions"], 2)
+
+    def test_workload_uses_latest_day(self) -> None:
+        facts = call_tool(self.store, "workload")
+        self.assertEqual(facts["as_of"], "2026-10-14")
+        self.assertEqual(facts["acwr"], 0.84)
+        self.assertEqual(facts["acwr_zone"], "optimal")
+
+    def test_workload_without_data(self) -> None:
+        store = gold_store()
+        self.assertFalse(call_tool(store, "workload")["found"])
+        store.close()
+
+    def test_training_plan_is_built_from_complete_weeks(self) -> None:
+        plan = call_tool(self.store, "training_plan", today=TODAY)
+        self.assertTrue(plan["found"])
+        self.assertGreater(plan["basis_weekly_km"], 0)
+        self.assertEqual(len(plan["days"]), 7)
+
+    def test_training_plan_arguments_are_bounded(self) -> None:
+        with self.assertRaises(ToolArgumentError):
+            call_tool(self.store, "training_plan", sessions_per_week=40, today=TODAY)
 
 
 class RouterTest(unittest.TestCase):
     def test_routes_to_expected_intents(self) -> None:
         self.assertEqual(route("What was my longest run?")[0], "longest_run")
-        self.assertEqual(route("show my recent runs")[0], "recent_runs")
+        self.assertEqual(route("show my recent runs")[0], "recent_activities")
         self.assertEqual(route("is my data fresh?")[0], "data_coverage")
         self.assertEqual(route("am I improving?")[0], "trend")
         self.assertEqual(route("weekly mileage please")[0], "weekly_volume")
+        self.assertEqual(route("how is my training load?")[0], "workload")
+        self.assertEqual(route("give me a plan for next week")[0], "training_plan")
+        self.assertEqual(route("what sports did I do")[0], "sport_breakdown")
+
+    def test_sport_is_detected(self) -> None:
+        self.assertEqual(route("how many gym sessions last month")[1]["sport"], "strength")
+        self.assertEqual(route("my swim distance this week")[1]["sport"], "swim")
+        self.assertEqual(route("how far did I run this week")[1]["sport"], "run")
 
     def test_unknown_question_falls_back_to_coverage(self) -> None:
         self.assertEqual(route("what is the capital of France")[0], "data_coverage")
@@ -209,8 +273,7 @@ class ChatTest(unittest.TestCase):
     def test_llm_answer_is_used_when_it_passes_the_guard(self) -> None:
         facts = call_tool(self.store, "longest_run")
         text = f"Nice work: {facts['distance_km']} km on {facts['date']}."
-        client = FakeClient(text)
-        result = answer(self.store, "longest run?", client=client, today=TODAY)
+        result = answer(self.store, "longest run?", client=FakeClient(text), today=TODAY)
         self.assertEqual(result.mode, "llm")
         self.assertEqual(result.answer, text)
 
@@ -231,17 +294,36 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(result.mode, "deterministic")
 
     def test_null_hr_is_described_as_unavailable(self) -> None:
-        # Routes to the `window` tool, which is the one that reports heart rate.
-        store = seeded_store([activity("x", "2026-10-15", 10000.0, 3000.0, None)])
+        store = gold_store()
+        add_activity(store, "x", "2026-10-13", avg_hr=None, trimp=None)
         result = answer(store, "what was my average heart rate?", client=None, today=TODAY)
         store.close()
         self.assertEqual(result.intent, "window")
         self.assertIn("No heart-rate data", result.answer)
         self.assertNotIn("0 bpm", result.answer)  # NULL must never render as zero
 
-    def test_weekly_question_routes_to_weekly_volume(self) -> None:
-        result = answer(self.store, "how far did I run this week?", client=None, today=TODAY)
-        self.assertEqual(result.intent, "weekly_volume")
+    def test_workload_answer_names_the_zone(self) -> None:
+        result = answer(self.store, "am I overdoing it?", client=None, today=TODAY)
+        self.assertEqual(result.intent, "workload")
+        self.assertIn("optimal", result.answer)
+        self.assertIn("0.84", result.answer)
+
+    def test_strength_question_reports_sets(self) -> None:
+        result = answer(self.store, "how many gym sessions this week", client=None, today=TODAY)
+        self.assertIn("20 sets", result.answer)
+
+    def test_plan_answer_uses_only_plan_facts(self) -> None:
+        result = answer(self.store, "plan my next week", client=None, today=TODAY)
+        self.assertEqual(result.intent, "training_plan")
+        ok, reason = guard_llm_answer(result.answer, result.facts)
+        self.assertTrue(ok, reason)  # every number in the answer exists in the facts
+
+    def test_every_deterministic_answer_passes_its_own_guard(self) -> None:
+        for question in ("longest run", "recent", "fresh data", "trend", "weekly", "28 days",
+                         "load", "what sports", "walk distance", "gym this month"):
+            result = answer(self.store, question, client=None, today=TODAY)
+            ok, reason = guard_llm_answer(result.answer, result.facts)
+            self.assertTrue(ok, f"{question!r}: {reason}")
 
 
 class FakeClient:
